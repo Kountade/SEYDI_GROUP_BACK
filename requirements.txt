@@ -1,0 +1,14 @@
+asgiref==3.11.1
+Django==5.2.13
+django-cors-headers==4.9.0
+django-filter==25.2
+django-rest-knox==5.0.4
+django-rest-passwordreset==1.5.0
+djangorestframework==3.17.1
+gunicorn==25.3.0
+packaging==26.0
+pillow==12.2.0
+python-decouple==3.8
+sqlparse==0.5.5
+tzdata==2026.1
+whitenoise==6.12.0
