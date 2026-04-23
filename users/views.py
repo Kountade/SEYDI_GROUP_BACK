@@ -45,11 +45,18 @@ class RegisterViewset(viewsets.ViewSet):
             return Response({"user": UserSerializer(user).data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=400)
 
+# users/views.py - UserViewset complet
 
 class UserViewset(viewsets.ViewSet):
+    """
+    ViewSet pour la gestion des utilisateurs
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        """
+        Retourne la liste des utilisateurs accessibles selon le rôle
+        """
         user = self.request.user
         if user.est_pdg() or user.est_drh():
             return User.objects.all()
@@ -62,6 +69,9 @@ class UserViewset(viewsets.ViewSet):
         ).distinct()
 
     def list(self, request):
+        """
+        Liste des utilisateurs avec filtres
+        """
         queryset = self.get_queryset()
         role_global = request.query_params.get('role_global')
         if role_global:
@@ -74,6 +84,9 @@ class UserViewset(viewsets.ViewSet):
         return Response(serializer.data)
 
     def retrieve(self, request, pk=None):
+        """
+        Détails d'un utilisateur
+        """
         try:
             user = User.objects.get(pk=pk)
             # Vérification des droits
@@ -90,14 +103,117 @@ class UserViewset(viewsets.ViewSet):
         except User.DoesNotExist:
             return Response({"error": "Utilisateur non trouvé"}, status=404)
 
-    @action(detail=True, methods=['post'])
-    def assign_role(self, request, pk=None):
+    def create(self, request):
+        """
+        Création d'un utilisateur (via RegisterViewset généralement)
+        """
+        serializer = RegisterSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def update(self, request, pk=None):
+        """
+        Mise à jour complète d'un utilisateur
+        """
         if not (request.user.est_pdg() or request.user.est_drh()):
-            return Response({"error": "Permission denied"}, status=403)
+            if request.user.id != int(pk):
+                return Response({"error": "Permission denied"}, status=403)
+        
         try:
             user = User.objects.get(pk=pk)
         except User.DoesNotExist:
             return Response({"error": "Utilisateur non trouvé"}, status=404)
+        
+        serializer = UserDetailSerializer(user, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def partial_update(self, request, pk=None):
+        """
+        Mise à jour partielle d'un utilisateur (pour activation/désactivation)
+        """
+        # Vérification des droits
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            if request.user.id != int(pk):
+                return Response({"error": "Permission denied. Seul le PDG ou DRH peut modifier les utilisateurs"}, status=403)
+        
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Utilisateur non trouvé"}, status=404)
+        
+        serializer = UserDetailSerializer(user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def destroy(self, request, pk=None):
+        """
+        Suppression d'un utilisateur
+        """
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            return Response({"error": "Permission denied. Seul le PDG ou DRH peut supprimer des utilisateurs"}, status=403)
+        
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Utilisateur non trouvé"}, status=404)
+        
+        # Ne pas supprimer son propre compte
+        if request.user.id == user.id:
+            return Response({"error": "Vous ne pouvez pas supprimer votre propre compte"}, status=400)
+        
+        user.delete()
+        return Response({"message": "Utilisateur supprimé avec succès"}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['patch'])
+    def toggle_active(self, request, pk=None):
+        """
+        Active ou désactive un utilisateur
+        """
+        # Vérification des droits
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            if request.user.id != int(pk):
+                return Response({"error": "Permission denied. Seul le PDG ou DRH peut modifier le statut des utilisateurs"}, status=403)
+        
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Utilisateur non trouvé"}, status=404)
+        
+        # Ne pas désactiver son propre compte
+        if request.user.id == user.id and user.is_active:
+            return Response({"error": "Vous ne pouvez pas désactiver votre propre compte"}, status=400)
+        
+        # Inverser le statut
+        user.is_active = not user.is_active
+        user.save()
+        
+        status_text = "activé" if user.is_active else "désactivé"
+        return Response({
+            "id": user.id,
+            "is_active": user.is_active,
+            "message": f"Utilisateur {user.email} {status_text} avec succès"
+        })
+
+    @action(detail=True, methods=['post'])
+    def assign_role(self, request, pk=None):
+        """
+        Assigner un rôle à un utilisateur dans une agence
+        """
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            return Response({"error": "Permission denied"}, status=403)
+        
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Utilisateur non trouvé"}, status=404)
+        
         serializer = AssignRoleSerializer(data=request.data)
         if serializer.is_valid():
             role = RoleAgence.objects.create(
@@ -111,11 +227,16 @@ class UserViewset(viewsets.ViewSet):
 
     @action(detail=True, methods=['delete'])
     def remove_role(self, request, pk=None):
+        """
+        Retirer un rôle d'un utilisateur
+        """
         if not (request.user.est_pdg() or request.user.est_drh()):
             return Response({"error": "Permission denied"}, status=403)
+        
         role_id = request.data.get('role_id')
         if not role_id:
             return Response({"error": "role_id required"}, status=400)
+        
         try:
             role = RoleAgence.objects.get(id=role_id, user_id=pk)
             role.est_actif = False
@@ -123,6 +244,41 @@ class UserViewset(viewsets.ViewSet):
             return Response({"message": "Rôle retiré avec succès"})
         except RoleAgence.DoesNotExist:
             return Response({"error": "Rôle non trouvé"}, status=404)
+
+    @action(detail=False, methods=['get'])
+    def me(self, request):
+        """
+        Retourne le profil de l'utilisateur connecté
+        """
+        serializer = UserDetailSerializer(request.user)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        """
+        Statistiques des utilisateurs
+        """
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            return Response({"error": "Permission denied"}, status=403)
+        
+        users = self.get_queryset()
+        stats = {
+            "total": users.count(),
+            "active": users.filter(is_active=True).count(),
+            "inactive": users.filter(is_active=False).count(),
+            "pdg": users.filter(role_global='pdg').count(),
+            "drh": users.filter(role_global='drh').count(),
+            "autre": users.filter(role_global='autre').count(),
+            "by_agence": {}
+        }
+        
+        # Statistiques par agence
+        for agence in Agence.objects.filter(est_active=True):
+            count = users.filter(roles_agence__agence_id=agence.id, roles_agence__est_actif=True).count()
+            if count > 0:
+                stats["by_agence"][agence.nom] = count
+        
+        return Response(stats)
 
 
 class ProfileViewset(viewsets.ViewSet):
