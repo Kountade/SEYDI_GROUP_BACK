@@ -53,6 +53,8 @@ INSTALLED_APPS = [
     "users",
     "produits",
     "drh",
+    "inventaire",
+    "purchases",
     
 ]
 
