@@ -237,20 +237,44 @@ class PurchaseReceiptItemSerializer(serializers.ModelSerializer):
         model = PurchaseReceiptItem
         fields = '__all__'
 
+# Ajoutez ou modifiez dans serializers.py
 
 class PurchaseReceiptSerializer(serializers.ModelSerializer):
     items = PurchaseReceiptItemSerializer(many=True, read_only=True)
     received_by_name = serializers.CharField(source='received_by.email', read_only=True)
+    
+    # Ajoutez ces champs calculés
+    total_value = serializers.SerializerMethodField()
     total_costs = serializers.SerializerMethodField()
+    supplier_name = serializers.SerializerMethodField()
+    order_number = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseReceipt
         fields = '__all__'
         read_only_fields = ('receipt_number', 'created_at')
 
+    def get_total_value(self, obj):
+        """Calcule la valeur totale des marchandises reçues"""
+        total = 0
+        for item in obj.items.all():
+            # Utiliser le prix unitaire du moment de la réception
+            total += item.order_item.unit_price * item.quantity
+        return total
+
     def get_total_costs(self, obj):
+        """Calcule le total des frais annexes"""
+        # Si vous avez des frais liés à la réception
         total = obj.costs.aggregate(total=models.Sum('amount_in_local_currency'))['total']
         return total or 0
+
+    def get_supplier_name(self, obj):
+        """Retourne le nom du fournisseur"""
+        return obj.purchase_order.supplier.company_name if obj.purchase_order else None
+
+    def get_order_number(self, obj):
+        """Retourne le numéro de commande"""
+        return obj.purchase_order.order_number if obj.purchase_order else None
 
 
 class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
@@ -490,13 +514,19 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
         except Exception as e:
             raise serializers.ValidationError(f"Erreur lors de la mise à jour du stock: {str(e)}")
 
+# Dans serializers.py - Modifiez PurchaseReceiptDetailSerializer
 
 class PurchaseReceiptDetailSerializer(serializers.ModelSerializer):
     items = PurchaseReceiptItemSerializer(many=True, read_only=True)
     received_by_name = serializers.CharField(source='received_by.email', read_only=True)
     costs = serializers.SerializerMethodField()
-    waybills = serializers.SerializerMethodField()
+    # waybills = serializers.SerializerMethodField()  # ← COMMENTEZ OU SUPPRIMEZ CETTE LIGNE
     total_costs = serializers.SerializerMethodField()
+    
+    # Ajoutez ces champs
+    total_value = serializers.SerializerMethodField()
+    supplier_name = serializers.SerializerMethodField()
+    order_number = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseReceipt
@@ -506,13 +536,26 @@ class PurchaseReceiptDetailSerializer(serializers.ModelSerializer):
     def get_costs(self, obj):
         return ReceiptCostSerializer(obj.costs.all(), many=True).data
 
-    def get_waybills(self, obj):
-        return WaybillSerializer(obj.waybills.all(), many=True).data
+    # COMMENTEZ OU SUPPRIMEZ CETTE MÉTHODE
+    # def get_waybills(self, obj):
+    #     return WaybillSerializer(obj.waybills.all(), many=True).data
 
     def get_total_costs(self, obj):
         total = obj.costs.aggregate(total=models.Sum('amount_in_local_currency'))['total']
         return total or 0
+    
+    def get_total_value(self, obj):
+        """Calcule la valeur totale des marchandises reçues"""
+        total = 0
+        for item in obj.items.all():
+            total += item.order_item.unit_price * item.quantity
+        return total
 
+    def get_supplier_name(self, obj):
+        return obj.purchase_order.supplier.company_name if obj.purchase_order else None
+
+    def get_order_number(self, obj):
+        return obj.purchase_order.order_number if obj.purchase_order else None
 
 class TransporterSerializer(serializers.ModelSerializer):
     class Meta:
