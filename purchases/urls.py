@@ -1,40 +1,38 @@
+# purchases/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import *
-from django.conf import settings
-from django.conf.urls.static import static
+from . import views
 
 router = DefaultRouter()
-router.register('suppliers', SupplierViewSet, basename='suppliers')
-router.register('purchase-orders', PurchaseOrderViewSet, basename='purchase-orders')
-router.register('purchase-receipts', PurchaseReceiptViewSet, basename='purchase-receipts')
-router.register('transporters', TransporterViewSet, basename='transporters')
-router.register('waybills', WaybillViewSet, basename='waybills')
-router.register('receipt-costs', ReceiptCostViewSet, basename='receipt-costs')
-router.register('supplier-catalogs', SupplierCatalogViewSet, basename='supplier-catalogs')
-router.register('purchase-alerts', PurchaseAlertViewSet, basename='purchase-alerts')
-router.register('price-history', PurchasePriceHistoryViewSet, basename='price-history')
+router.register('suppliers', views.SupplierViewSet, basename='suppliers')
+router.register('purchase-orders', views.PurchaseOrderViewSet, basename='purchase-orders')
+router.register('purchase-receipts', views.PurchaseReceiptViewSet, basename='purchase-receipts')
+router.register('transporters', views.TransporterViewSet, basename='transporters')
+router.register('waybills', views.WaybillViewSet, basename='waybills')
+router.register('receipt-costs', views.ReceiptCostViewSet, basename='receipt-costs')
+router.register('supplier-catalogs', views.SupplierCatalogViewSet, basename='supplier-catalogs')
+router.register('purchase-alerts', views.PurchaseAlertViewSet, basename='purchase-alerts')
+router.register('price-history', views.PurchasePriceHistoryViewSet, basename='price-history')
 
 urlpatterns = [
     path('', include(router.urls)),
     
-    # Endpoints supplémentaires (non-CRUD)
-    path('dashboard/stats/', PurchaseDashboardView.as_view(), name='purchase-dashboard'),
-    path('purchase-orders/by-supplier/<int:supplier_id>/', PurchaseOrderBySupplierView.as_view(), name='purchase-orders-by-supplier'),
-    path('purchase-orders/by-agence/<int:agence_id>/', PurchaseOrderByAgenceView.as_view(), name='purchase-orders-by-agence'),
-    path('purchase-orders/<int:pk>/validate/', PurchaseOrderValidateView.as_view(), name='purchase-order-validate'),
-    path('purchase-orders/<int:pk>/cancel/', PurchaseOrderCancelView.as_view(), name='purchase-order-cancel'),
-    path('purchase-orders/<int:pk>/send/', PurchaseOrderSendView.as_view(), name='purchase-order-send'),
-    path('purchase-receipts/by-order/<int:order_id>/', PurchaseReceiptByOrderView.as_view(), name='purchase-receipts-by-order'),
-    path('suppliers/<int:pk>/evaluate/', SupplierEvaluateView.as_view(), name='supplier-evaluate'),
-    path('suppliers/<int:pk>/statistics/', SupplierStatisticsView.as_view(), name='supplier-statistics'),
-    path('supplier-catalogs/<int:pk>/import/', SupplierCatalogImportView.as_view(), name='supplier-catalog-import'),
-    path('waybills/by-order/<int:order_id>/', WaybillByOrderView.as_view(), name='waybills-by-order'),
-    path('waybills/<int:pk>/update-status/', WaybillUpdateStatusView.as_view(), name='waybill-update-status'),
-    path('receipt-costs/by-receipt/<int:receipt_id>/', ReceiptCostByReceiptView.as_view(), name='receipt-costs-by-receipt'),
-    path('receipt-costs/<int:pk>/allocate/', ReceiptCostAllocateView.as_view(), name='receipt-cost-allocate'),
+    # URLs supplémentaires
+    path('suppliers/<int:pk>/evaluate/', views.SupplierEvaluateView.as_view(), name='supplier-evaluate'),
+    path('suppliers/<int:pk>/statistics/', views.SupplierStatisticsView.as_view(), name='supplier-statistics'),
+    
+    path('purchase-orders/by-supplier/<int:supplier_id>/', views.PurchaseOrderBySupplierView.as_view(), name='purchase-orders-by-supplier'),
+    path('purchase-orders/by-agence/<int:agence_id>/', views.PurchaseOrderByAgenceView.as_view(), name='purchase-orders-by-agence'),
+    
+    path('purchase-receipts/by-order/<int:order_id>/', views.PurchaseReceiptByOrderView.as_view(), name='purchase-receipts-by-order'),
+    
+    path('waybills/by-order/<int:order_id>/', views.WaybillByOrderView.as_view(), name='waybills-by-order'),
+    path('waybills/<int:pk>/update-status/', views.WaybillUpdateStatusView.as_view(), name='waybill-update-status'),
+    
+    path('receipt-costs/by-receipt/<int:receipt_id>/', views.ReceiptCostByReceiptView.as_view(), name='receipt-costs-by-receipt'),
+    path('receipt-costs/<int:pk>/allocate/', views.ReceiptCostAllocateView.as_view(), name='receipt-cost-allocate'),
+    
+    path('supplier-catalogs/<int:pk>/import/', views.SupplierCatalogImportView.as_view(), name='supplier-catalog-import'),
+    
+    path('dashboard/', views.PurchaseDashboardView.as_view(), name='purchase-dashboard'),
 ]
-
-# Ajouter la configuration pour servir les fichiers média en développement
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

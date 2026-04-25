@@ -196,7 +196,38 @@ class PurchaseOrderCreateUpdateSerializer(serializers.ModelSerializer):
         instance.calculate_totals()
         return instance
 
+# Ajoutez dans serializers.py
 
+class PurchaseOrderUpdateStatusSerializer(serializers.ModelSerializer):
+    """Serializer spécifique pour la mise à jour du statut"""
+    
+    class Meta:
+        model = PurchaseOrder
+        fields = ['status']
+    
+    def validate_status(self, value):
+        instance = self.instance
+        if instance:
+            allowed_transitions = {
+                'draft': ['sent', 'cancelled'],
+                'sent': ['confirmed', 'cancelled'],
+                'confirmed': ['in_transit', 'cancelled'],
+                'in_transit': ['partially_received', 'received'],
+                'partially_received': ['received'],
+            }
+            
+            current_status = instance.status
+            if current_status in allowed_transitions:
+                if value not in allowed_transitions[current_status]:
+                    raise serializers.ValidationError(
+                        f"Transition non autorisée: {current_status} -> {value}"
+                    )
+            elif current_status not in ['draft', 'sent', 'confirmed', 'in_transit', 'partially_received']:
+                raise serializers.ValidationError(
+                    f"Impossible de modifier le statut: la commande est {dict(PurchaseOrder.STATUS_CHOICES).get(current_status, current_status)}"
+                )
+        
+        return value
 class PurchaseReceiptItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='order_item.product.name', read_only=True)
     product_reference = serializers.CharField(source='order_item.product.reference', read_only=True)
