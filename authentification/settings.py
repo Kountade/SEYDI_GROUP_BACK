@@ -52,7 +52,7 @@ INSTALLED_APPS = [
     "django_filters",
     "users",
     "produits",
-    "drh",
+    "hr",
     "inventaire",
     "purchases",
     "audit",
