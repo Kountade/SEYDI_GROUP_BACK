@@ -196,11 +196,14 @@ class StockMovement(models.Model):
         super().save(*args, **kwargs)
 
 
+
 class Transfer(models.Model):
-    """Transfert entre entrepôts"""
+    """Transfert entre agences - avec workflow d'approbation"""
     STATUS_CHOICES = (
         ('draft', 'Brouillon'),
-        ('pending', 'En attente'),
+        ('pending_approval', 'En attente d\'approbation'),
+        ('approved', 'Approuvé'),
+        ('rejected', 'Rejeté'),
         ('in_transit', 'En transit'),
         ('partial', 'Partiellement reçu'),
         ('completed', 'Terminé'),
@@ -208,12 +211,19 @@ class Transfer(models.Model):
     )
 
     reference = models.CharField(max_length=100, unique=True)
-    from_warehouse = models.ForeignKey(
-        Warehouse, on_delete=models.PROTECT, related_name='transfers_out')
-    to_warehouse = models.ForeignKey(
-        Warehouse, on_delete=models.PROTECT, related_name='transfers_in')
-    status = models.CharField(
-        max_length=20, choices=STATUS_CHOICES, default='draft')
+    from_agence = models.ForeignKey(
+        'users.Agence',
+        on_delete=models.PROTECT,
+        related_name='transfers_from',
+        verbose_name="Agence source"
+    )
+    to_agence = models.ForeignKey(
+        'users.Agence',
+        on_delete=models.PROTECT,
+        related_name='transfers_to',
+        verbose_name="Agence destination"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     transfer_date = models.DateField(auto_now_add=True)
     expected_date = models.DateField(null=True, blank=True)
     completed_date = models.DateField(null=True, blank=True)
@@ -223,13 +233,20 @@ class Transfer(models.Model):
     )
     notes = models.TextField(blank=True, null=True)
     created_by = models.ForeignKey(
-        CustomUser, on_delete=models.SET_NULL, null=True,
+        'users.CustomUser', on_delete=models.SET_NULL, null=True,
         related_name='created_transfers'
     )
     validated_by = models.ForeignKey(
-        CustomUser, on_delete=models.SET_NULL, null=True,
+        'users.CustomUser', on_delete=models.SET_NULL, null=True,
         blank=True, related_name='validated_transfers'
     )
+    approved_by = models.ForeignKey(
+        'users.CustomUser', on_delete=models.SET_NULL, null=True,
+        blank=True, related_name='approved_transfers'
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejected_reason = models.TextField(blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -237,12 +254,31 @@ class Transfer(models.Model):
         indexes = [
             models.Index(fields=['reference']),
             models.Index(fields=['status']),
+            models.Index(fields=['from_agence', 'to_agence']),
         ]
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Transfer {self.reference}: {self.from_warehouse.code} → {self.to_warehouse.code}"
+        return f"Transfer {self.reference}: {self.from_agence.nom} → {self.to_agence.nom}"
 
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            last = Transfer.objects.order_by('-id').first()
+            if last:
+                last_num = int(last.reference.replace('TRF', ''))
+                self.reference = f"TRF{str(last_num + 1).zfill(6)}"
+            else:
+                self.reference = "TRF000001"
+        super().save(*args, **kwargs)
+
+
+def get_default_warehouse(agence):
+    """Retourne l'entrepôt par défaut d'une agence, ou le premier actif."""
+    from .models import Warehouse
+    warehouse = agence.warehouses.filter(is_default=True).first()
+    if not warehouse:
+        warehouse = agence.warehouses.filter(is_active=True).first()
+    return warehouse
 
 class TransferItem(models.Model):
     """Article dans un transfert"""
@@ -269,9 +305,10 @@ class TransferItem(models.Model):
 
     @property
     def remaining_quantity(self):
-        return self.quantity - self.quantity_received
-
-
+        """Retourne la quantité restant à recevoir, gère les valeurs None."""
+        qty = self.quantity if self.quantity is not None else 0
+        received = self.quantity_received if self.quantity_received is not None else 0
+        return qty - received
 class InventoryCount(models.Model):
     """Comptage d'inventaire"""
     STATUS_CHOICES = (

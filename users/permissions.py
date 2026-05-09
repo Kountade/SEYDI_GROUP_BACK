@@ -11,6 +11,8 @@ class HasAgenceAccess(BasePermission):
     Permission pour vérifier que l'utilisateur a accès à l'agence
     - PDG et DRH ont accès à tout
     - Les autres utilisateurs n'ont accès qu'à leurs agences
+    - CORRECTION : Pour les transferts, on autorise si l'utilisateur a accès
+      à l'agence source OU à l'agence destination
     """
 
     def has_permission(self, request, view):
@@ -26,6 +28,14 @@ class HasAgenceAccess(BasePermission):
         if hasattr(request.user, 'est_pdg') and request.user.est_pdg():
             return True
         if hasattr(request.user, 'est_drh') and request.user.est_drh():
+            return True
+        
+        # ============================================================
+        # CORRECTION : Pour le TransferViewSet, toujours autoriser
+        # car la validation se fait dans le serializer et les actions
+        # ============================================================
+        view_name = view.__class__.__name__
+        if view_name == 'TransferViewSet':
             return True
         
         return True
@@ -44,6 +54,18 @@ class HasAgenceAccess(BasePermission):
             return True
         if hasattr(request.user, 'est_drh') and request.user.est_drh():
             return True
+        
+        # ============================================================
+        # CORRECTION : Pour les objets Transfer, vérifier l'accès
+        # à l'agence source OU destination
+        # ============================================================
+        from inventaire.models import Transfer
+        
+        if isinstance(obj, Transfer):
+            # L'utilisateur peut voir le transfert s'il a accès à l'agence source OU destination
+            has_from_access = request.user.peut_acceder_agence(obj.from_agence_id)
+            has_to_access = request.user.peut_acceder_agence(obj.to_agence_id)
+            return has_from_access or has_to_access
         
         # Vérifier si l'objet a un champ 'agence'
         if hasattr(obj, 'agence') and obj.agence:
@@ -69,6 +91,9 @@ class HasAgenceAccess(BasePermission):
         
         # Par défaut, refuser l'accès par sécurité
         return False
+
+
+# ... (le reste des permissions reste inchangé)
 
 
 class IsPDG(BasePermission):
@@ -106,14 +131,11 @@ class IsCommercial(BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # PDG et DRH ont tous les droits
         if (hasattr(request.user, 'est_pdg') and request.user.est_pdg()) or \
            (hasattr(request.user, 'est_drh') and request.user.est_drh()):
             return True
         
-        # Vérifier si l'utilisateur a un rôle commercial
         if hasattr(request.user, 'a_role_dans_agence'):
-            # Vérifier s'il a au moins une agence où il est commercial
             agences = request.user.get_agences()
             for agence in agences:
                 if request.user.a_role_dans_agence(agence.id, 'commercial'):
@@ -129,12 +151,10 @@ class IsGestionnaireStock(BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # PDG et DRH ont tous les droits
         if (hasattr(request.user, 'est_pdg') and request.user.est_pdg()) or \
            (hasattr(request.user, 'est_drh') and request.user.est_drh()):
             return True
         
-        # Vérifier si l'utilisateur a un rôle gestionnaire de stock
         if hasattr(request.user, 'a_role_dans_agence'):
             agences = request.user.get_agences()
             for agence in agences:
@@ -151,12 +171,10 @@ class IsChefAgence(BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # PDG et DRH ont tous les droits
         if (hasattr(request.user, 'est_pdg') and request.user.est_pdg()) or \
            (hasattr(request.user, 'est_drh') and request.user.est_drh()):
             return True
         
-        # Vérifier si l'utilisateur a un rôle chef d'agence
         if hasattr(request.user, 'a_role_dans_agence'):
             agences = request.user.get_agences()
             for agence in agences:
@@ -183,13 +201,11 @@ class HasSpecificAgenceAccess(BasePermission):
            (hasattr(request.user, 'est_drh') and request.user.est_drh()):
             return True
         
-        # Récupérer l'ID de l'agence depuis l'URL
         agence_id = view.kwargs.get('agence_id') or view.kwargs.get('pk')
         
         if agence_id and hasattr(request.user, 'peut_acceder_agence'):
             return request.user.peut_acceder_agence(int(agence_id))
         
-        # Si pas d'agence spécifiée dans l'URL, on autorise (sera filtré par queryset)
         return True
 
 
@@ -207,11 +223,9 @@ class CanManageInventory(BasePermission):
            (hasattr(request.user, 'est_drh') and request.user.est_drh()):
             return True
         
-        # Vérifier les permissions Django
         if request.user.has_perm('inventory.can_manage_inventory'):
             return True
         
-        # Vérifier les rôles
         if hasattr(request.user, 'a_role_dans_agence'):
             agences = request.user.get_agences()
             for agence in agences:
@@ -236,11 +250,9 @@ class CanManagePurchases(BasePermission):
            (hasattr(request.user, 'est_drh') and request.user.est_drh()):
             return True
         
-        # Vérifier les permissions Django
         if request.user.has_perm('purchases.can_manage_purchases'):
             return True
         
-        # Vérifier les rôles
         if hasattr(request.user, 'a_role_dans_agence'):
             agences = request.user.get_agences()
             for agence in agences:
@@ -264,11 +276,9 @@ class CanValidateOrders(BasePermission):
            (hasattr(request.user, 'est_drh') and request.user.est_drh()):
             return True
         
-        # Vérifier les permissions Django
         if request.user.has_perm('users.can_validate_orders'):
             return True
         
-        # Vérifier les rôles
         if hasattr(request.user, 'a_role_dans_agence'):
             agences = request.user.get_agences()
             for agence in agences:

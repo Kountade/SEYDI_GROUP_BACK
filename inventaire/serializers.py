@@ -101,16 +101,7 @@ class StockMovementCreateSerializer(serializers.ModelSerializer):
         return data
 
 
-class TransferListSerializer(serializers.ModelSerializer):
-    from_warehouse_name = serializers.CharField(source='from_warehouse.name', read_only=True)
-    to_warehouse_name = serializers.CharField(source='to_warehouse.name', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    created_by_email = serializers.EmailField(source='created_by.email', read_only=True)
-
-    class Meta:
-        model = Transfer
-        fields = '__all__'
-
+# inventaire/serializers.py
 
 class TransferItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -120,50 +111,153 @@ class TransferItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = TransferItem
         fields = '__all__'
-
-
-class TransferDetailSerializer(serializers.ModelSerializer):
-    from_warehouse = WarehouseSerializer(read_only=True)
-    to_warehouse = WarehouseSerializer(read_only=True)
-    items = TransferItemSerializer(many=True, read_only=True)
-    created_by = UserSerializer(read_only=True)
-    validated_by = UserSerializer(read_only=True)
-
-    class Meta:
-        model = Transfer
-        fields = '__all__'
+        extra_kwargs = {
+            'transfer': {'required': False, 'read_only': True},
+            'variant': {'required': False, 'allow_null': True},
+            'notes': {'required': False, 'allow_blank': True},
+            'quantity_received': {'required': False, 'default': 0},
+        }
 
 
 class TransferCreateSerializer(serializers.ModelSerializer):
-    items = TransferItemSerializer(many=True)
+    items = TransferItemSerializer(many=True, write_only=True)
+
+    class Meta:
+        model = Transfer
+        fields = ('from_agence', 'to_agence', 'expected_date', 'notes', 'items')
+        read_only_fields = ('reference', 'created_at', 'updated_at', 'created_by',
+                            'validated_by', 'completed_date', 'approved_by',
+                            'approved_at', 'rejected_reason')
+
+    def validate(self, data):
+        from_agence = data.get('from_agence')
+        to_agence = data.get('to_agence')
+        items_data = data.get('items', [])
+
+        if not from_agence or not to_agence:
+            raise serializers.ValidationError(
+                "Les deux agences sont requises"
+            )
+
+        if from_agence == to_agence:
+            raise serializers.ValidationError(
+                "Les agences source et destination doivent être différentes"
+            )
+
+        if from_agence.type_agence != 'principale':
+            raise serializers.ValidationError(
+                {"from_agence": "L'agence source doit être une agence principale"}
+            )
+            
+        if to_agence.type_agence != 'secondaire':
+            raise serializers.ValidationError(
+                {"to_agence": "L'agence destination doit être une agence secondaire"}
+            )
+
+        user = self.context['request'].user
+        if not user.peut_acceder_agence(to_agence.id):
+            raise serializers.ValidationError(
+                "Vous devez être rattaché à l'agence secondaire destinataire"
+            )
+
+        if not items_data:
+            raise serializers.ValidationError(
+                {"items": "Au moins un article est requis"}
+            )
+
+        # Validation des items
+        for i, item in enumerate(items_data):
+            if not item.get('product'):
+                raise serializers.ValidationError(
+                    {"items": f"Article {i+1}: le produit est requis"}
+                )
+            
+            quantity = item.get('quantity', 0)
+            try:
+                quantity = int(quantity)
+            except (ValueError, TypeError):
+                raise serializers.ValidationError(
+                    {"items": f"Article {i+1}: la quantité doit être un nombre entier"}
+                )
+            
+            if quantity <= 0:
+                raise serializers.ValidationError(
+                    {"items": f"Article {i+1}: la quantité doit être positive"}
+                )
+            
+            unit_price = item.get('unit_price', 0)
+            try:
+                unit_price = float(unit_price)
+            except (ValueError, TypeError):
+                raise serializers.ValidationError(
+                    {"items": f"Article {i+1}: le prix unitaire doit être un nombre"}
+                )
+            
+            if unit_price <= 0:
+                raise serializers.ValidationError(
+                    {"items": f"Article {i+1}: le prix unitaire doit être positif"}
+                )
+
+        return data
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        
+        # Récupérer l'utilisateur depuis le contexte
+        user = self.context['request'].user
+        
+        # CORRECTION : Supprimer 'created_by' s'il existe déjà dans validated_data
+        # car perform_create l'ajoute automatiquement
+        validated_data.pop('created_by', None)
+        
+        # Créer le transfert avec l'utilisateur connecté
+        transfer = Transfer.objects.create(
+            **validated_data,
+            created_by=user
+        )
+        
+        # Créer les items liés au transfert
+        for item_data in items_data:
+            # Gérer le cas où 'product' est un objet ou un ID
+            product = item_data.get('product')
+            if hasattr(product, 'id'):
+                product_id = product.id
+            else:
+                product_id = int(product)
+            
+            TransferItem.objects.create(
+                transfer=transfer,
+                product_id=product_id,
+                quantity=int(item_data['quantity']),
+                unit_price=float(item_data['unit_price']),
+                notes=item_data.get('notes', '')
+            )
+        
+        return transfer
+
+class TransferListSerializer(serializers.ModelSerializer):
+    from_agence_nom = serializers.CharField(source='from_agence.nom', read_only=True)
+    to_agence_nom = serializers.CharField(source='to_agence.nom', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    created_by_email = serializers.EmailField(source='created_by.email', read_only=True)
 
     class Meta:
         model = Transfer
         fields = '__all__'
-        read_only_fields = ('reference', 'created_at', 'updated_at', 'created_by', 'validated_by', 'completed_date')
 
-    def create(self, validated_data):
-        items_data = validated_data.pop('items')
-        transfer = Transfer.objects.create(**validated_data)
 
-        for item_data in items_data:
-            TransferItem.objects.create(transfer=transfer, **item_data)
+class TransferDetailSerializer(serializers.ModelSerializer):
+    from_agence = AgenceSimpleSerializer(read_only=True)
+    to_agence = AgenceSimpleSerializer(read_only=True)
+    items = TransferItemSerializer(many=True, read_only=True)
+    created_by = UserSerializer(read_only=True)
+    validated_by = UserSerializer(read_only=True)
+    approved_by = UserSerializer(read_only=True)
 
-        return transfer
+    class Meta:
+        model = Transfer
+        fields = '__all__'
 
-    def update(self, instance, validated_data):
-        items_data = validated_data.pop('items', None)
-
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-
-        if items_data is not None:
-            instance.items.all().delete()
-            for item_data in items_data:
-                TransferItem.objects.create(transfer=instance, **item_data)
-
-        return instance
 
 
 class InventoryCountListSerializer(serializers.ModelSerializer):

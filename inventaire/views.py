@@ -98,8 +98,37 @@ class StockMovementByWarehouseView(generics.ListAPIView):
         )
 
 
+from rest_framework import viewsets, generics, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
+from django.utils import timezone
+from django.shortcuts import get_object_or_404
+from .models import Transfer, TransferItem, StockMovement, Warehouse
+from .serializers import (
+    TransferListSerializer, TransferDetailSerializer, TransferCreateSerializer
+)
+from users.permissions import HasAgenceAccess
+from produits.models import Product
+
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.db import transaction
+from django.utils import timezone
+from django.db.models import Q
+from .models import Transfer, TransferItem, StockMovement, get_default_warehouse
+from .serializers import (
+    TransferListSerializer, TransferDetailSerializer, TransferCreateSerializer
+)
+from users.permissions import HasAgenceAccess
+from produits.models import Product
+
+# inventaire/views.py - Ajouter ces méthodes dans TransferViewSet
+
 class TransferViewSet(viewsets.ModelViewSet):
-    """ViewSet pour les transferts"""
+    """ViewSet pour les transferts avec workflow complet"""
     permission_classes = [IsAuthenticated, HasAgenceAccess]
 
     def get_queryset(self):
@@ -108,8 +137,7 @@ class TransferViewSet(viewsets.ModelViewSet):
             return Transfer.objects.all()
         agences_ids = user.get_agences().values_list('id', flat=True)
         return Transfer.objects.filter(
-            Q(from_warehouse__agence_id__in=agences_ids) |
-            Q(to_warehouse__agence_id__in=agences_ids)
+            Q(from_agence_id__in=agences_ids) | Q(to_agence_id__in=agences_ids)
         )
 
     def get_serializer_class(self):
@@ -121,6 +149,256 @@ class TransferViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        """Soumettre la demande au chef d'agence principale"""
+        transfer = self.get_object()
+        if transfer.status != 'draft':
+            return Response(
+                {'error': 'Seul un transfert en brouillon peut être soumis'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérifier que l'utilisateur est le chef de l'agence destination
+        if not request.user.peut_acceder_agence(transfer.to_agence.id):
+            return Response(
+                {'error': 'Vous n\'êtes pas autorisé à soumettre cette demande'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Vérifier que le transfert va bien d'une principale vers une secondaire
+        if transfer.from_agence.type_agence != 'principale' or transfer.to_agence.type_agence != 'secondaire':
+            return Response(
+                {'error': 'Seules les demandes de l\'agence principale vers une agence secondaire sont autorisées'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        transfer.status = 'pending_approval'
+        transfer.save()
+        return Response(TransferDetailSerializer(transfer).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def approve(self, request, pk=None):
+        """
+        Approuver le transfert (chef agence principale)
+        Cette méthode DÉBLOQUE le stock de l'entrepôt source
+        """
+        transfer = self.get_object()
+        
+        if transfer.status != 'pending_approval':
+            return Response(
+                {'error': 'La demande doit être en attente d\'approbation'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérifier que l'utilisateur est le chef de l'agence source (principale)
+        if not request.user.peut_acceder_agence(transfer.from_agence.id):
+            return Response(
+                {'error': 'Seul un responsable de l\'agence principale peut approuver'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Récupérer les entrepôts par défaut
+        from_warehouse = get_default_warehouse(transfer.from_agence)
+        to_warehouse = get_default_warehouse(transfer.to_agence)
+        
+        if not from_warehouse:
+            return Response(
+                {'error': f'L\'agence {transfer.from_agence.nom} n\'a aucun entrepôt configuré'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if not to_warehouse:
+            return Response(
+                {'error': f'L\'agence {transfer.to_agence.nom} n\'a aucun entrepôt configuré'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérifier le stock dans l'entrepôt source
+        for item in transfer.items.all():
+            product = item.product
+            stock_dispo = product.stock_quantity
+            
+            if stock_dispo < item.quantity:
+                return Response(
+                    {'error': f'Stock insuffisant pour {product.name}. Disponible: {stock_dispo}, demandé: {item.quantity}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # CRÉER LES MOUVEMENTS DE STOCK (SORTIE DE L'ENTREPÔT SOURCE)
+        for item in transfer.items.all():
+            # Mouvement de sortie (déstockage)
+            StockMovement.objects.create(
+                movement_type='transfer',
+                reference_type='transfer',
+                reference_id=transfer.id,
+                product=item.product,
+                variant=item.variant,
+                quantity=item.quantity,
+                from_warehouse=from_warehouse,
+                unit_price=item.unit_price,
+                notes=f"Transfert approuvé {transfer.reference} - Sortie vers {to_warehouse.name}",
+                created_by=request.user
+            )
+            
+            # Mettre à jour le stock produit (DÉBLOCAGE)
+            product = item.product
+            product.stock_quantity -= item.quantity
+            product.save()
+            
+            # Créer une entrée en transit (optionnel)
+            # On pourrait aussi créer un mouvement d'entrée plus tard lors de la réception
+
+        transfer.status = 'approved'
+        transfer.approved_by = request.user
+        transfer.approved_at = timezone.now()
+        transfer.save()
+
+        return Response(TransferDetailSerializer(transfer).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def start_transit(self, request, pk=None):
+        """
+        Démarrer le transit (après préparation physique)
+        Status: approved -> in_transit
+        """
+        transfer = self.get_object()
+        
+        if transfer.status != 'approved':
+            return Response(
+                {'error': 'Le transfert doit être approuvé avant de démarrer le transit'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        transfer.status = 'in_transit'
+        transfer.save()
+        
+        return Response(TransferDetailSerializer(transfer).data)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def receive(self, request, pk=None):
+        """
+        RECEPTIONNER le transfert (chef agence destination)
+        Valide la réception et crédite le stock de l'entrepôt destination
+        """
+        transfer = self.get_object()
+        
+        if transfer.status != 'in_transit' and transfer.status != 'partial':
+            return Response(
+                {'error': 'Le transfert doit être en transit pour être réceptionné'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Vérifier que l'utilisateur est le chef de l'agence destination
+        if not request.user.peut_acceder_agence(transfer.to_agence.id):
+            return Response(
+                {'error': 'Seul un responsable de l\'agence destination peut réceptionner'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Récupérer les données de réception
+        received_items = request.data.get('items', [])
+        waybill = request.data.get('waybill', '')
+        notes = request.data.get('notes', '')
+        
+        # Récupérer l'entrepôt destination
+        to_warehouse = get_default_warehouse(transfer.to_agence)
+        if not to_warehouse:
+            return Response(
+                {'error': f'L\'agence {transfer.to_agence.nom} n\'a aucun entrepôt configuré'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Mettre à jour les quantités reçues
+        all_completed = True
+        
+        for item_data in received_items:
+            item_id = item_data.get('item_id')
+            quantity_received = item_data.get('quantity', 0)
+            
+            try:
+                transfer_item = TransferItem.objects.get(id=item_id, transfer=transfer)
+            except TransferItem.DoesNotExist:
+                continue
+            
+            # Mettre à jour la quantité reçue
+            transfer_item.quantity_received += quantity_received
+            transfer_item.save()
+            
+            # CRÉER LE MOUVEMENT D'ENTRÉE (STOCK DESTINATION)
+            StockMovement.objects.create(
+                movement_type='transfer',
+                reference_type='transfer',
+                reference_id=transfer.id,
+                product=transfer_item.product,
+                variant=transfer_item.variant,
+                quantity=quantity_received,
+                to_warehouse=to_warehouse,
+                unit_price=transfer_item.unit_price,
+                notes=f"Réception transfert {transfer.reference} - {notes}",
+                created_by=request.user
+            )
+            
+            # Vérifier si l'article est complètement reçu
+            if transfer_item.quantity_received < transfer_item.quantity:
+                all_completed = False
+        
+        # Mettre à jour le statut global
+        if all_completed:
+            transfer.status = 'completed'
+            transfer.completed_date = timezone.now().date()
+        else:
+            transfer.status = 'partial'
+        
+        if waybill:
+            transfer.waybill = waybill
+        
+        transfer.save()
+        
+        return Response(TransferDetailSerializer(transfer).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Rejeter le transfert"""
+        transfer = self.get_object()
+        
+        if transfer.status != 'pending_approval':
+            return Response(
+                {'error': 'La demande doit être en attente d\'approbation'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not request.user.peut_acceder_agence(transfer.from_agence.id):
+            return Response(
+                {'error': 'Action non autorisée'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        reason = request.data.get('reason', '')
+        transfer.status = 'rejected'
+        transfer.rejected_reason = reason
+        transfer.save()
+        
+        return Response(TransferDetailSerializer(transfer).data)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Annuler le transfert"""
+        transfer = self.get_object()
+        
+        if transfer.status not in ['draft', 'pending_approval', 'approved']:
+            return Response(
+                {'error': 'Ce transfert ne peut pas être annulé'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        transfer.status = 'cancelled'
+        transfer.save()
+        
+        return Response(TransferDetailSerializer(transfer).data)
 
 
 class TransferValidateView(generics.UpdateAPIView):

@@ -309,12 +309,25 @@ class AgenceViewset(viewsets.ModelViewSet):
     serializer_class = AgenceSerializer
 
     def get_queryset(self):
+        """
+        Code B : Liste = toutes agences actives (pour le navbar)
+        Mais les autres actions (retrieve, update, destroy) restent sécurisées
+        """
         user = self.request.user
+        
+        # Pour la liste (GET /agences/) - afficher toutes les agences actives
+        # C'est ce que le Navbar utilise pour le sélecteur d'agence
+        if self.action == 'list':
+            return Agence.objects.filter(est_active=True)
+        
+        # Pour les autres actions (retrieve, update, destroy, create)
+        # Application stricte des permissions
         if user.est_pdg():
             return Agence.objects.all()
         elif user.est_drh():
             return Agence.objects.filter(est_active=True)
         else:
+            # Les chefs d'agence, gestionnaires, etc. ne voient que LEUR agence
             agences_ids = user.roles_agence.filter(
                 est_actif=True).values_list('agence_id', flat=True)
             return Agence.objects.filter(id__in=agences_ids, est_active=True)
@@ -333,6 +346,34 @@ class AgenceViewset(viewsets.ModelViewSet):
             return Response(AgenceSerializer(agence).data, status=201)
         return Response(serializer.errors, status=400)
 
+    def update(self, request, *args, **kwargs):
+        """Sécurité renforcée pour la modification"""
+        agence = self.get_object()
+        user = request.user
+        
+        # Vérification stricte des droits de modification
+        if not user.est_pdg():
+            # Seul le PDG peut modifier une agence
+            return Response(
+                {"error": "Seul le PDG peut modifier une agence"}, 
+                status=403
+            )
+        
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        """Sécurité renforcée pour la suppression"""
+        agence = self.get_object()
+        user = request.user
+        
+        if not user.est_pdg():
+            return Response(
+                {"error": "Seul le PDG peut supprimer une agence"}, 
+                status=403
+            )
+        
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=True, methods=['get'])
     def utilisateurs(self, request, pk=None):
         agence = self.get_object()
@@ -346,9 +387,16 @@ class AgenceViewset(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def roles_disponibles(self, request, pk=None):
         agence = self.get_object()
+        # Sécurité : seul le PDG ou DRH peut voir les rôles disponibles
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            return Response({"error": "Permission denied"}, status=403)
         roles = [{'value': r[0], 'label': r[1]}
                  for r in agence.get_roles_disponibles()]
-        return Response({'type_agence': agence.type_agence, 'type_display': agence.get_type_agence_display(), 'roles': roles})
+        return Response({
+            'type_agence': agence.type_agence, 
+            'type_display': agence.get_type_agence_display(), 
+            'roles': roles
+        })
 
 
 class RoleAgenceViewset(viewsets.ModelViewSet):
