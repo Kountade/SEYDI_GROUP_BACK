@@ -518,3 +518,52 @@ class QualityControl(models.Model):
 
     def __str__(self):
         return f"Contrôle {self.lot.lot_number} - {self.get_result_display()}"
+    
+    
+    
+
+
+def get_default_warehouse(agence):
+    """
+    Retourne l'entrepôt par défaut d'une agence.
+    Si aucun entrepôt n'existe, en crée un automatiquement.
+    """
+    from .models import Warehouse
+    
+    # ÉTAPE 1 : Chercher l'entrepôt marqué comme défaut
+    warehouse = agence.warehouses.filter(is_default=True).first()
+    
+    # ÉTAPE 2 : Sinon, prendre le premier entrepôt actif
+    if not warehouse:
+        warehouse = agence.warehouses.filter(is_active=True).first()
+    
+    # ÉTAPE 3 : Si toujours aucun entrepôt, en créer un automatiquement
+    if not warehouse:
+        warehouse = Warehouse.objects.create(
+            # Générer un code unique pour l'entrepôt
+            code=f"WH_{agence.code if agence.code else agence.id}",
+            
+            # Nom par défaut basé sur le nom de l'agence
+            name=f"Entrepôt principal - {agence.nom}",
+            
+            # Type par défaut : 'main' (entrepôt principal)
+            warehouse_type="main",
+            
+            # Associer l'entrepôt à l'agence
+            agence=agence,
+            
+            # Utiliser les informations de l'agence
+            address=agence.adresse,
+            city=agence.ville,
+            postal_code=agence.code_postal,
+            country=agence.pays,
+            
+            # Marquer comme actif et par défaut
+            is_active=True,
+            is_default=True
+        )
+        
+        # Optionnel : journaliser la création (pour debug)
+        print(f"⚠️ Entrepôt automatiquement créé pour {agence.nom}: {warehouse.code}")
+    
+    return warehouse
