@@ -1,4 +1,5 @@
-# products/urls.py
+# products/urls.py - Ajoutez le router pour ProductPricingViewSet
+
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import *
@@ -11,12 +12,11 @@ router.register('brands', BrandViewset, basename='brands')
 router.register('units', UnitViewset, basename='units')
 router.register('products', ProductViewset, basename='products')
 router.register('variants', ProductVariantViewset, basename='variants')
+router.register('product-prices', ProductPricingViewSet, basename='product-prices')  # NOUVEAU
 
 urlpatterns = [
     path('', include(router.urls)),
 ]
 
-# Ajouter la configuration pour servir les fichiers média en développement
 if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL,
-                          document_root=settings.MEDIA_ROOT)
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
