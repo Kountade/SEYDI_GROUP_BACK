@@ -1,15 +1,31 @@
-# inventaire/signals.py - Créez ce fichier
+# inventaire/signals.py - Version corrigée
+
+from django.db.models.signals import post_save, pre_save
+from django.dispatch import receiver
+from django.db import models as django_models  # Correction ici
+from .models import StockMovement, WarehouseStock, Warehouse, Transfer, TransferItem
+from produits.models import Product
+
+# inventaire/signals.py - Version corrigée
 
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.db.models import Sum
 from .models import StockMovement, WarehouseStock, Warehouse
 from produits.models import Product
 
 
 @receiver(post_save, sender=StockMovement)
 def update_warehouse_stock(sender, instance, created, **kwargs):
-    """Met à jour le stock par entrepôt lors d'un mouvement"""
+    """
+    Met à jour le stock par entrepôt lors d'un mouvement
+    IMPORTANT: Ne pas exécuter si le mouvement a déjà été traité manuellement
+    """
     if not created:
+        return
+    
+    # Éviter la double mise à jour (si déjà traité dans la vue)
+    if hasattr(instance, '_stock_updated'):
         return
     
     # Pour les entrées
@@ -30,10 +46,12 @@ def update_warehouse_stock(sender, instance, created, **kwargs):
         
         # Mettre à jour le stock global du produit
         product = instance.product
-        product.stock_quantity = WarehouseStock.objects.filter(product=product).aggregate(
-            total=models.Sum('quantity')
+        total_stock = WarehouseStock.objects.filter(product=product).aggregate(
+            total=Sum('quantity')
         )['total'] or 0
-        product.save()
+        if product.stock_quantity != total_stock:
+            product.stock_quantity = total_stock
+            product.save(update_fields=['stock_quantity', 'updated_at'])
     
     # Pour les sorties
     if instance.from_warehouse:
@@ -49,10 +67,12 @@ def update_warehouse_stock(sender, instance, created, **kwargs):
             
             # Mettre à jour le stock global du produit
             product = instance.product
-            product.stock_quantity = WarehouseStock.objects.filter(product=product).aggregate(
-                total=models.Sum('quantity')
+            total_stock = WarehouseStock.objects.filter(product=product).aggregate(
+                total=Sum('quantity')
             )['total'] or 0
-            product.save()
+            if product.stock_quantity != total_stock:
+                product.stock_quantity = total_stock
+                product.save(update_fields=['stock_quantity', 'updated_at'])
 
 
 @receiver(post_save, sender=Warehouse)
