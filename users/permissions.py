@@ -286,3 +286,49 @@ class CanValidateOrders(BasePermission):
                     return True
         
         return False
+    
+    
+    
+
+# users/permissions.py - Ajoutez cette classe à la fin du fichier
+
+class IsPDGOrChefAgence(BasePermission):
+    """
+    Permission combinée pour PDG ou Chef d'agence
+    Utilise AND au lieu de OR pour éviter les erreurs d'opérateur
+    """
+    
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        # Vérifier si l'utilisateur est PDG
+        if hasattr(request.user, 'est_pdg') and request.user.est_pdg():
+            return True
+        
+        # Vérifier si l'utilisateur est Chef d'agence
+        if hasattr(request.user, 'est_chef_agence') and request.user.est_chef_agence():
+            return True
+        
+        return False
+    
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        # PDG a tous les droits
+        if hasattr(request.user, 'est_pdg') and request.user.est_pdg():
+            return True
+        
+        # Chef d'agence - vérifier l'accès à l'objet
+        if hasattr(request.user, 'est_chef_agence') and request.user.est_chef_agence():
+            # Si l'objet a un entrepôt, vérifier l'accès à l'agence
+            if hasattr(obj, 'warehouse') and obj.warehouse:
+                if hasattr(obj.warehouse, 'agence'):
+                    return request.user.peut_acceder_agence(obj.warehouse.agence.id)
+            # Si l'objet a un produit, vérifier l'accès via les prix
+            if hasattr(obj, 'product'):
+                # Pour les opérations sur les prix, on vérifie au niveau permission
+                return True
+        
+        return False

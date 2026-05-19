@@ -121,11 +121,11 @@ class ProductVariant(models.Model):
     def __str__(self):
         return f"{self.product.name} - {self.sku}"
 
+# products/models.py - Corrigez la classe ProductPricing
 
 class ProductPricing(models.Model):
     """
     Prix d'un produit dans un entrepôt spécifique
-    Permet d'avoir des prix différents selon l'agence/entrepôt
     """
     product = models.ForeignKey(
         Product, 
@@ -138,7 +138,6 @@ class ProductPricing(models.Model):
         related_name='product_prices'
     )
     
-    # Prix spécifiques à cet entrepôt
     purchase_price = models.DecimalField(
         max_digits=10, 
         decimal_places=2, 
@@ -162,22 +161,18 @@ class ProductPricing(models.Model):
         verbose_name="Prix de gros"
     )
     
-    # Devise (car prix peuvent différer selon le pays)
     currency = models.CharField(max_length=10, default='XOF')
     
-    # Taux de TVA spécifique à l'entrepôt
     tax_rate = models.IntegerField(
         default=20,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
         help_text="Taux de TVA en %"
     )
     
-    # Date de validité du prix
     valid_from = models.DateField(auto_now_add=True)
     valid_to = models.DateField(null=True, blank=True)
     is_current = models.BooleanField(default=True)
     
-    # Historique
     updated_by = models.ForeignKey(
         CustomUser, 
         on_delete=models.SET_NULL, 
@@ -187,7 +182,8 @@ class ProductPricing(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        unique_together = ['product', 'warehouse']
+        # Supprimez unique_together temporairement
+        # unique_together = ['product', 'warehouse']  # COMMENTEZ CETTE LIGNE
         ordering = ['product__name', 'warehouse__name']
         verbose_name = "Prix par entrepôt"
         verbose_name_plural = "Prix par entrepôt"
