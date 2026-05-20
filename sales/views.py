@@ -140,7 +140,31 @@ class ClientViewSet(viewsets.ModelViewSet):
                 notes="Création automatique pour association client-agence"
             )
 
+
+
+# sales/views.py - VenteViewSet complet corrigé
+
+from django.shortcuts import render
+from rest_framework import viewsets, generics, status, filters
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Sum, Q
+from django.utils import timezone
+from django.db import transaction
+from decimal import Decimal
+
+from .models import *
+from .serializers import *
+from users.permissions import HasAgenceAccess, IsPDG, IsChefAgence
+from inventaire.models import WarehouseStock, StockMovement, Warehouse
+
+
 class VenteViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des ventes
+    """
     permission_classes = [IsAuthenticated, HasAgenceAccess]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'agence', 'type_vente', 'est_paye']
@@ -163,119 +187,371 @@ class VenteViewSet(viewsets.ModelViewSet):
             return Vente.objects.filter(agence_id__in=agences_ids)
         return Vente.objects.filter(vendeur=user)
     
+    # ============================================================
+    # SOUMETTRE UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def submit(self, request, pk=None):
+        """
+        Soumettre une vente pour approbation
+        Vérifie le stock avant soumission
+        """
         vente = self.get_object()
         
         if vente.status != 'draft':
-            return Response({'error': 'Seule une vente en brouillon peut être soumise'}, status=400)
+            return Response(
+                {'error': f'Seule une vente en brouillon peut être soumise. Statut actuel: {vente.status}'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
+        # Récupérer l'entrepôt de l'agence
         warehouse = vente.agence.warehouses.filter(is_default=True).first()
         if not warehouse:
-            return Response({'error': f"Entrepôt non configuré"}, status=400)
+            warehouse = vente.agence.warehouses.filter(is_active=True).first()
         
+        if not warehouse:
+            return Response({
+                'error': f'Aucun entrepôt configuré pour l\'agence {vente.agence.nom}. Veuillez configurer un entrepôt avant de continuer.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Vérifier les stocks
+        stock_insuffisant = []
         for item in vente.items.all():
             stock = WarehouseStock.objects.filter(
-                product=item.product, warehouse=warehouse, variant=item.variant
+                product=item.product, 
+                warehouse=warehouse, 
+                variant=item.variant
             ).first()
             
-            if not stock or stock.quantity < item.quantity:
-                return Response({
-                    'error': f"Stock insuffisant pour {item.product.name}"
-                }, status=400)
+            if not stock:
+                stock_insuffisant.append({
+                    'product': item.product.name,
+                    'message': 'Stock non configuré dans cet entrepôt'
+                })
+            elif stock.quantity < item.quantity:
+                stock_insuffisant.append({
+                    'product': item.product.name,
+                    'disponible': stock.quantity,
+                    'demande': item.quantity,
+                    'manquant': item.quantity - stock.quantity
+                })
+        
+        if stock_insuffisant:
+            return Response({
+                'error': 'Stock insuffisant pour soumettre la vente',
+                'details': stock_insuffisant
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         vente.status = 'pending_approval'
         vente.save()
         
-        return Response(VenteDetailSerializer(vente).data)
+        return Response({
+            'success': True,
+            'message': 'Vente soumise avec succès',
+            'data': VenteDetailSerializer(vente).data
+        })
     
+    # ============================================================
+    # APPROUVER UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def approve(self, request, pk=None):
+        """
+        Approuver une vente et déduire le stock
+        Seul le chef d'agence ou PDG peut approuver
+        """
         vente = self.get_object()
         user = request.user
         
+        # Vérification des droits
         if not user.est_chef_agence() and not user.est_pdg():
-            return Response({'error': 'Seul le chef d\'agence peut approuver'}, status=403)
+            return Response({
+                'error': 'Seul le chef d\'agence ou le PDG peut approuver une vente'
+            }, status=status.HTTP_403_FORBIDDEN)
         
+        # Vérifier l'accès à l'agence
         if not user.est_pdg() and not user.peut_acceder_agence(vente.agence.id):
-            return Response({'error': 'Non autorisé'}, status=403)
+            return Response({
+                'error': 'Vous n\'avez pas accès à cette agence'
+            }, status=status.HTTP_403_FORBIDDEN)
         
+        # Vérifier le statut
         if vente.status != 'pending_approval':
-            return Response({'error': 'Vente non en attente'}, status=400)
+            return Response({
+                'error': f'Seule une vente en attente peut être approuvée. Statut actuel: {vente.status}'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
+        # ============================================================
+        # RÉCUPÉRATION DE L'ENTREPÔT - CORRECTION ICI
+        # ============================================================
+        # 1. Essayer l'entrepôt par défaut
         warehouse = vente.agence.warehouses.filter(is_default=True).first()
-        if not warehouse:
-            return Response({'error': 'Entrepôt non configuré'}, status=400)
         
+        # 2. Sinon prendre le premier entrepôt actif
+        if not warehouse:
+            warehouse = vente.agence.warehouses.filter(is_active=True).first()
+        
+        # 3. Si toujours pas d'entrepôt, en créer un automatiquement
+        if not warehouse:
+            from inventaire.models import get_default_warehouse
+            warehouse = get_default_warehouse(vente.agence)
+        
+        # 4. Si toujours pas, retourner une erreur claire
+        if not warehouse:
+            return Response({
+                'error': f'Aucun entrepôt configuré pour l\'agence {vente.agence.nom}.',
+                'solution': 'Veuillez contacter l\'administrateur pour créer un entrepôt pour cette agence.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # ============================================================
+        # VÉRIFICATION DES STOCKS
+        # ============================================================
+        stock_insuffisant = []
+        for item in vente.items.all():
+            try:
+                stock = WarehouseStock.objects.get(
+                    product=item.product, 
+                    warehouse=warehouse, 
+                    variant=item.variant
+                )
+                
+                if stock.quantity < item.quantity:
+                    stock_insuffisant.append({
+                        'product': item.product.name,
+                        'reference': item.product.reference,
+                        'disponible': stock.quantity,
+                        'demande': item.quantity,
+                        'manquant': item.quantity - stock.quantity
+                    })
+            except WarehouseStock.DoesNotExist:
+                stock_insuffisant.append({
+                    'product': item.product.name,
+                    'reference': item.product.reference,
+                    'message': 'Produit non trouvé dans l\'entrepôt',
+                    'demande': item.quantity
+                })
+        
+        if stock_insuffisant:
+            return Response({
+                'error': 'Stock insuffisant pour approuver la vente',
+                'details': stock_insuffisant
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # ============================================================
+        # DÉDUCTION DES STOCKS
+        # ============================================================
         for item in vente.items.all():
             stock = WarehouseStock.objects.get(
-                product=item.product, warehouse=warehouse, variant=item.variant
+                product=item.product, 
+                warehouse=warehouse, 
+                variant=item.variant
             )
             
-            if stock.quantity < item.quantity:
-                return Response({'error': f"Stock insuffisant pour {item.product.name}"}, status=400)
-            
+            # Déduire le stock
             stock.quantity -= item.quantity
             stock.save()
             
+            # Marquer l'item comme prélevé
             item.stock_preleve = True
             item.warehouse_source = warehouse
             item.save()
             
+            # Créer le mouvement de stock
             StockMovement.objects.create(
-                movement_type='out', reference_type='sale', reference_id=vente.id,
-                product=item.product, variant=item.variant, quantity=item.quantity,
-                from_warehouse=warehouse, unit_price=item.prix_unitaire,
-                notes=f"Vente {vente.reference}", created_by=user
+                movement_type='out',
+                reference_type='sale',
+                reference_id=vente.id,
+                product=item.product,
+                variant=item.variant,
+                quantity=item.quantity,
+                from_warehouse=warehouse,
+                unit_price=item.prix_unitaire,
+                notes=f"Vente {vente.reference} approuvée",
+                created_by=user
             )
             
+            # Mettre à jour le stock global du produit
             total_stock = WarehouseStock.objects.filter(product=item.product).aggregate(
                 total=Sum('quantity')
             )['total'] or 0
             item.product.stock_quantity = total_stock
             item.product.save()
         
+        # Mettre à jour la vente
         vente.status = 'approved'
         vente.approved_by = user
         vente.date_approbation = timezone.now()
         vente.save()
         
-        return Response({'success': True, 'message': 'Vente approuvée'})
+        return Response({
+            'success': True,
+            'message': 'Vente approuvée avec succès',
+            'warehouse_used': {
+                'id': warehouse.id,
+                'name': warehouse.name,
+                'code': warehouse.code
+            },
+            'data': VenteDetailSerializer(vente).data
+        })
     
+    # ============================================================
+    # REJETER UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
+        """
+        Rejeter une vente
+        """
         vente = self.get_object()
         
         if vente.status != 'pending_approval':
-            return Response({'error': 'Vente non en attente'}, status=400)
+            return Response({
+                'error': f'Seule une vente en attente peut être rejetée. Statut actuel: {vente.status}'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         motif = request.data.get('motif')
         if not motif:
-            return Response({'error': 'Motif requis'}, status=400)
+            return Response({
+                'error': 'Un motif de rejet est requis'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         vente.status = 'rejected'
         vente.motif_rejet = motif
         vente.save()
         
-        return Response({'success': True, 'message': 'Vente rejetée'})
+        return Response({
+            'success': True,
+            'message': 'Vente rejetée',
+            'data': VenteDetailSerializer(vente).data
+        })
     
+    # ============================================================
+    # COMPLÉTER UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
+        """
+        Compléter une vente (après paiement total)
+        """
         vente = self.get_object()
         
         if vente.status != 'approved':
-            return Response({'error': 'Vente non approuvée'}, status=400)
+            return Response({
+                'error': f'Seule une vente approuvée peut être complétée. Statut actuel: {vente.status}'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         if vente.montant_paye < vente.total:
-            return Response({'error': 'Vente non entièrement payée'}, status=400)
+            reste = vente.total - vente.montant_paye
+            return Response({
+                'error': f'Vente non entièrement payée. Reste à payer: {reste} FCFA'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         vente.status = 'completed'
         vente.save()
         
-        return Response({'success': True, 'message': 'Vente complétée'})
-
+        return Response({
+            'success': True,
+            'message': 'Vente complétée avec succès',
+            'data': VenteDetailSerializer(vente).data
+        })
+    
+    # ============================================================
+    # ANNULER UNE VENTE
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def cancel(self, request, pk=None):
+        """
+        Annuler une vente et restituer le stock
+        """
+        vente = self.get_object()
+        
+        if vente.status in ['completed', 'cancelled']:
+            return Response({
+                'error': f'Cette vente ne peut pas être annulée car elle est {vente.status}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Si le stock a été prélevé, le restituer
+        for item in vente.items.filter(stock_preleve=True):
+            if item.warehouse_source:
+                try:
+                    stock = WarehouseStock.objects.get(
+                        product=item.product,
+                        warehouse=item.warehouse_source,
+                        variant=item.variant
+                    )
+                    stock.quantity += item.quantity
+                    stock.save()
+                    
+                    # Créer un mouvement de retour
+                    StockMovement.objects.create(
+                        movement_type='in',
+                        reference_type='sale',
+                        reference_id=vente.id,
+                        product=item.product,
+                        variant=item.variant,
+                        quantity=item.quantity,
+                        to_warehouse=item.warehouse_source,
+                        unit_price=item.prix_unitaire,
+                        notes=f"Annulation vente {vente.reference}",
+                        created_by=request.user
+                    )
+                    
+                    # Mettre à jour le stock global
+                    total_stock = WarehouseStock.objects.filter(product=item.product).aggregate(
+                        total=Sum('quantity')
+                    )['total'] or 0
+                    item.product.stock_quantity = total_stock
+                    item.product.save()
+                    
+                except WarehouseStock.DoesNotExist:
+                    pass
+        
+        vente.status = 'cancelled'
+        vente.save()
+        
+        return Response({
+            'success': True,
+            'message': 'Vente annulée avec succès',
+            'data': VenteDetailSerializer(vente).data
+        })
+    
+    # ============================================================
+    # STATISTIQUES DES VENTES
+    # ============================================================
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        """
+        Statistiques globales des ventes
+        """
+        user = request.user
+        
+        if user.est_pdg() or user.est_drh():
+            ventes = Vente.objects.all()
+        elif user.est_chef_agence():
+            agences_ids = user.get_agences().values_list('id', flat=True)
+            ventes = Vente.objects.filter(agence_id__in=agences_ids)
+        else:
+            ventes = Vente.objects.filter(vendeur=user)
+        
+        today = timezone.now().date()
+        ventes_today = ventes.filter(date_vente__date=today)
+        
+        return Response({
+            'total': ventes.count(),
+            'total_ca': ventes.filter(status='completed').aggregate(total=Sum('total'))['total'] or 0,
+            'ca_today': ventes_today.filter(status='completed').aggregate(total=Sum('total'))['total'] or 0,
+            'en_attente': ventes.filter(status='pending_approval').count(),
+            'approuvees': ventes.filter(status='approved').count(),
+            'completees': ventes.filter(status='completed').count(),
+            'rejetees': ventes.filter(status='rejected').count(),
+            'annulees': ventes.filter(status='cancelled').count(),
+            'impayes': ventes.filter(est_paye=False, status__in=['approved', 'completed']).aggregate(
+                total=Sum('montant_du')
+            )['total'] or 0
+        })
 
 class PaiementViewSet(viewsets.ModelViewSet):
     serializer_class = PaiementSerializer
