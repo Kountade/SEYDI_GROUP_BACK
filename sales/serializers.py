@@ -20,8 +20,8 @@ class VenteItemSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = VenteItem
-        fields = '__all__'
-        read_only_fields = ('id', 'total', 'stock_preleve')
+        exclude = ('vente',)  # Exclure le champ vente - CORRECTION ICI
+        read_only_fields = ('id', 'total', 'stock_preleve', 'product_name', 'product_reference')
 
 
 class VenteListSerializer(serializers.ModelSerializer):
@@ -51,6 +51,8 @@ class VenteDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+# sales/serializers.py - Corrigez la méthode create de VenteCreateSerializer
+
 class VenteCreateSerializer(serializers.ModelSerializer):
     items = VenteItemSerializer(many=True, write_only=True)
     client_id = serializers.IntegerField(required=False, allow_null=True)
@@ -69,13 +71,20 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         return data
     
     def create(self, validated_data):
+        from decimal import Decimal
+        
         items_data = validated_data.pop('items')
         client_id = validated_data.pop('client_id', None)
         user = self.context['request'].user
         
-        # Calculer les totaux
-        sous_total = sum((item.get('prix_unitaire', 0) * item.get('quantity', 0) for item in items_data))
-        tva = sous_total * 0.18
+        # Calculer les totaux avec Decimal
+        sous_total = Decimal('0')
+        for item in items_data:
+            prix = Decimal(str(item.get('prix_unitaire', 0)))
+            qte = Decimal(str(item.get('quantity', 0)))
+            sous_total += prix * qte
+        
+        tva = sous_total * Decimal('0.18')
         total = sous_total + tva
         
         vente = Vente.objects.create(
