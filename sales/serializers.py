@@ -2,6 +2,7 @@
 
 from rest_framework import serializers
 from django.db.models import Sum
+from decimal import Decimal
 from .models import *
 from produits.serializers import ProductListSerializer
 from users.serializers import UserSerializer, AgenceSimpleSerializer
@@ -20,7 +21,7 @@ class VenteItemSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = VenteItem
-        exclude = ('vente',)  # Exclure le champ vente - CORRECTION ICI
+        exclude = ('vente',)
         read_only_fields = ('id', 'total', 'stock_preleve', 'product_name', 'product_reference')
 
 
@@ -51,8 +52,6 @@ class VenteDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-# sales/serializers.py - Corrigez la méthode create de VenteCreateSerializer
-
 class VenteCreateSerializer(serializers.ModelSerializer):
     items = VenteItemSerializer(many=True, write_only=True)
     client_id = serializers.IntegerField(required=False, allow_null=True)
@@ -71,13 +70,10 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         return data
     
     def create(self, validated_data):
-        from decimal import Decimal
-        
         items_data = validated_data.pop('items')
         client_id = validated_data.pop('client_id', None)
         user = self.context['request'].user
         
-        # Calculer les totaux avec Decimal
         sous_total = Decimal('0')
         for item in items_data:
             prix = Decimal(str(item.get('prix_unitaire', 0)))
@@ -115,62 +111,70 @@ class PaiementSerializer(serializers.ModelSerializer):
 class PaiementCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Paiement
-        fields = ('vente', 'montant', 'methode', 'reference', 'notes')
+        fields = ('vente', 'montant', 'methode', 'reference_externe', 'notes')
     
     def create(self, validated_data):
         validated_data['encaisse_par'] = self.context['request'].user
         return super().create(validated_data)
 
 
-class FactureItemSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    
-    class Meta:
-        model = FactureItem
-        fields = '__all__'
-        read_only_fields = ('id', 'montant_ht', 'montant_tva', 'montant_ttc')
-
+# ----------------------------------------------------------------------
+# Facture : pas de FactureItem, les détails sont dans la vente associée
+# ----------------------------------------------------------------------
 
 class FactureListSerializer(serializers.ModelSerializer):
     client_nom = serializers.CharField(source='client.nom', read_only=True, allow_null=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-    statut_display = serializers.CharField(source='get_statut_display', read_only=True)
+    statut_display = serializers.CharField(source='get_status_display', read_only=True)
+    type_display = serializers.CharField(source='get_type_facture_display', read_only=True)
     
     class Meta:
         model = Facture
-        fields = ('id', 'reference', 'type_facture', 'statut', 'statut_display',
+        fields = ('id', 'reference', 'type_facture', 'type_display', 'status', 'statut_display',
                   'client_nom', 'agence_nom', 'date_facture', 'date_echeance', 
-                  'total_ttc', 'montant_paye', 'montant_restant')
+                  'total_ttc', 'montant_paye', 'montant_restant', 'currency')
 
 
 class FactureDetailSerializer(serializers.ModelSerializer):
     client = ClientSerializer(read_only=True)
     agence = AgenceSimpleSerializer(read_only=True)
-    items = FactureItemSerializer(many=True, read_only=True)
     cree_par = UserSerializer(read_only=True)
+    # Récupère les items depuis la vente associée
+    items = serializers.SerializerMethodField()
     
     class Meta:
         model = Facture
         fields = '__all__'
+    
+    def get_items(self, obj):
+        """Retourne les items de la vente associée à la facture"""
+        if obj.vente:
+            return VenteItemSerializer(obj.vente.items.all(), many=True).data
+        return []
 
 
 class FactureCreateSerializer(serializers.ModelSerializer):
-    items = FactureItemSerializer(many=True, write_only=True)
-    
     class Meta:
         model = Facture
         fields = ('vente', 'client', 'agence', 'type_facture', 'date_echeance',
-                  'conditions_paiement', 'notes', 'pied_de_page', 'items')
-        read_only_fields = ('id', 'reference', 'statut', 'date_facture', 'cree_par',
+                  'conditions_paiement', 'notes', 'pied_de_page')
+        read_only_fields = ('id', 'reference', 'status', 'date_facture', 'cree_par',
                            'sous_total', 'tva', 'total_ttc', 'montant_paye', 'montant_restant')
     
+    def validate(self, data):
+        vente = data.get('vente')
+        if not vente:
+            raise serializers.ValidationError({"vente": "La vente est obligatoire"})
+        return data
+    
     def create(self, validated_data):
-        items_data = validated_data.pop('items')
         user = self.context['request'].user
+        vente = validated_data['vente']
         
-        sous_total = sum((item['prix_unitaire_ht'] * item['quantite'] for item in items_data))
-        tva = sum((item['prix_unitaire_ht'] * item['quantite'] * (item.get('tva', 18) / 100) for item in items_data))
-        total_ttc = sous_total + tva
+        # Récupère les totaux depuis la vente
+        sous_total = vente.sous_total
+        tva = vente.tva
+        total_ttc = vente.total
         
         facture = Facture.objects.create(
             **validated_data,
@@ -178,17 +182,15 @@ class FactureCreateSerializer(serializers.ModelSerializer):
             sous_total=sous_total,
             tva=tva,
             total_ttc=total_ttc,
-            montant_restant=total_ttc
+            montant_restant=total_ttc,
+            montant_paye=0
         )
-        
-        for item_data in items_data:
-            FactureItem.objects.create(facture=facture, **item_data)
-        
         return facture
 
 
+# Serializer pour l'enregistrement d'un paiement sur facture
 class FacturePaiementSerializer(serializers.Serializer):
     montant = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0.01)
-    methode = serializers.ChoiceField(choices=Paiement.METHODES)
+    methode = serializers.ChoiceField(choices=Paiement.METHODES_PAIEMENT)
     reference = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
