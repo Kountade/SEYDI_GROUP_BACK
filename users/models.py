@@ -244,6 +244,8 @@ class RoleAgence(models.Model):
         return f"{self.user.email} - {self.agence.nom} : {self.get_role_display()}"
 
 
+# users/models.py - Classe CustomUser complète
+
 class CustomUser(AbstractUser):
     """
     Modèle utilisateur personnalisé avec gestion multi-agences et rôles
@@ -253,18 +255,6 @@ class CustomUser(AbstractUser):
     - Rôles globaux (PDG, DRH)
     - Rôles par agence (Chef, Commercial, Gestionnaire)
     - Informations professionnelles complètes
-
-    Attributs:
-        ROLE_GLOBAL_CHOICES: Rôles au niveau entreprise
-        email: Identifiant principal (unique, requis)
-        birthday: Date de naissance
-        username: Optionnel (pour compatibilité)
-        role_global: Rôle au niveau entreprise
-        phone: Téléphone
-        address: Adresse
-        employee_id: Matricule unique
-        agence_principale: Agence par défaut
-        profile_picture: Photo de profil
     """
 
     # Rôles globaux (niveau entreprise)
@@ -274,61 +264,43 @@ class CustomUser(AbstractUser):
         ('autre', 'Autre'),
     )
 
-    email = models.EmailField(
-        max_length=200, unique=True, verbose_name="Email")
-    birthday = models.DateField(
-        null=True, blank=True, verbose_name="Date de naissance")
-    username = models.CharField(
-        max_length=200, null=True, blank=True, verbose_name="Nom d'utilisateur")
+    email = models.EmailField(max_length=200, unique=True, verbose_name="Email")
+    birthday = models.DateField(null=True, blank=True, verbose_name="Date de naissance")
+    username = models.CharField(max_length=200, null=True, blank=True, verbose_name="Nom d'utilisateur")
 
     # Rôle global
-    role_global = models.CharField(max_length=20, choices=ROLE_GLOBAL_CHOICES,
-                                   default='autre', verbose_name="Rôle global")
+    role_global = models.CharField(max_length=20, choices=ROLE_GLOBAL_CHOICES, default='autre', verbose_name="Rôle global")
 
     # Département (conservé pour compatibilité)
-    department = models.CharField(
-        max_length=20, null=True, blank=True, verbose_name="Département")
+    department = models.CharField(max_length=20, null=True, blank=True, verbose_name="Département")
 
     # Informations personnelles
-    phone = models.CharField(max_length=20, null=True,
-                             blank=True, verbose_name="Téléphone")
+    phone = models.CharField(max_length=20, null=True, blank=True, verbose_name="Téléphone")
     address = models.TextField(null=True, blank=True, verbose_name="Adresse")
-    city = models.CharField(max_length=100, null=True,
-                            blank=True, verbose_name="Ville")
-    country = models.CharField(
-        max_length=100, null=True, blank=True, default='France', verbose_name="Pays")
-    postal_code = models.CharField(
-        max_length=20, null=True, blank=True, verbose_name="Code postal")
+    city = models.CharField(max_length=100, null=True, blank=True, verbose_name="Ville")
+    country = models.CharField(max_length=100, null=True, blank=True, default='Sénégal', verbose_name="Pays")
+    postal_code = models.CharField(max_length=20, null=True, blank=True, verbose_name="Code postal")
 
     # Informations professionnelles
-    employee_id = models.CharField(max_length=50, unique=True, null=True, blank=True,
-                                   verbose_name="Matricule")
-    hire_date = models.DateField(
-        null=True, blank=True, verbose_name="Date d'embauche")
-    contract_type = models.CharField(max_length=50, null=True, blank=True,
-                                     verbose_name="Type de contrat")
-    salary = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
-                                 verbose_name="Salaire")
+    employee_id = models.CharField(max_length=50, unique=True, null=True, blank=True, verbose_name="Matricule")
+    hire_date = models.DateField(null=True, blank=True, verbose_name="Date d'embauche")
+    contract_type = models.CharField(max_length=50, null=True, blank=True, verbose_name="Type de contrat")
+    salary = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Salaire")
 
     # Agence principale (optionnel)
-    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True,
-                                          blank=True, related_name='utilisateurs_principaux',
-                                          verbose_name="Agence principale")
+    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True, blank=True, 
+                                          related_name='utilisateurs_principaux', verbose_name="Agence principale")
 
     # Métadonnées
     is_active = models.BooleanField(default=True, verbose_name="Actif")
-    last_login_ip = models.GenericIPAddressField(
-        null=True, blank=True, verbose_name="Dernière IP")
-    created_at = models.DateTimeField(
-        auto_now_add=True, verbose_name="Date de création")
-    updated_at = models.DateTimeField(
-        auto_now=True, verbose_name="Date de modification")
+    last_login_ip = models.GenericIPAddressField(null=True, blank=True, verbose_name="Dernière IP")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Date de modification")
     created_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='created_users', verbose_name="Créé par")
 
     # Photo de profil
-    profile_picture = models.ImageField(upload_to='profile_pictures/', null=True, blank=True,
-                                        verbose_name="Photo de profil")
+    profile_picture = models.ImageField(upload_to='profile_pictures/', null=True, blank=True, verbose_name="Photo de profil")
 
     objects = CustomUserManager()
 
@@ -350,13 +322,10 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return f"{self.email} ({self.get_role_global_display()})"
 
+    # ==================== MÉTHODES DE BASE ====================
+    
     def get_full_name(self):
-        """
-        Retourne le nom complet de l'utilisateur
-
-        Returns:
-            str: Prénom + Nom ou email si non renseignés
-        """
+        """Retourne le nom complet de l'utilisateur"""
         if self.first_name and self.last_name:
             return f"{self.first_name} {self.last_name}"
         return self.email
@@ -365,72 +334,66 @@ class CustomUser(AbstractUser):
         """Alias de get_full_name pour compatibilité"""
         return self.get_full_name()
 
+    # ==================== MÉTHODES DE RÔLES GLOBAUX ====================
+    
     def est_pdg(self):
-        """
-        Vérifie si l'utilisateur est PDG
-
-        Returns:
-            bool: True si rôle_global = 'pdg'
-        """
+        """Vérifie si l'utilisateur est PDG"""
         return self.role_global == 'pdg'
 
     def est_drh(self):
-        """
-        Vérifie si l'utilisateur est DRH
-
-        Returns:
-            bool: True si rôle_global = 'drh'
-        """
+        """Vérifie si l'utilisateur est DRH"""
         return self.role_global == 'drh'
 
-    def get_agences(self):
+    # ==================== MÉTHODES DE RÔLES PAR AGENCE ====================
+    
+    def est_chef_agence(self, agence_id=None):
         """
-        Retourne toutes les agences auxquelles l'utilisateur a accès
-
-        Returns:
-            QuerySet: Agences accessibles selon le rôle global et les rôles par agence
-
-        Note:
-            - PDG: Toutes les agences actives
-            - DRH: Toutes les agences actives (gestion RH)
-            - Autres: Agences via leurs rôles
+        Vérifie si l'utilisateur est chef d'agence
+        - Si agence_id est fourni: vérifie pour cette agence
+        - Sinon: vérifie s'il est chef dans au moins une agence
         """
-        if self.est_pdg() or self.est_drh():
-            return Agence.objects.filter(est_active=True)
+        if agence_id:
+            return self.a_role_dans_agence(agence_id, 'chef_agence')
+        return self.roles_agence.filter(role='chef_agence', est_actif=True).exists()
 
-        agences_ids = self.roles_agence.filter(
-            est_actif=True).values_list('agence_id', flat=True)
-        return Agence.objects.filter(id__in=agences_ids, est_active=True)
-
-    def get_agences_par_type(self):
+    def est_commercial(self, agence_id=None):
         """
-        Retourne les agences groupées par type
-
-        Returns:
-            dict: {
-                'principales': QuerySet des agences principales,
-                'secondaires': QuerySet des agences secondaires
-            }
+        Vérifie si l'utilisateur est commercial
+        - Si agence_id est fourni: vérifie pour cette agence
+        - Sinon: vérifie s'il est commercial dans au moins une agence
         """
-        agences = self.get_agences()
-        return {
-            'principales': agences.filter(type_agence='principale'),
-            'secondaires': agences.filter(type_agence='secondaire'),
-        }
+        if agence_id:
+            return self.a_role_dans_agence(agence_id, 'commercial')
+        return self.roles_agence.filter(role='commercial', est_actif=True).exists()
+
+    def est_gestionnaire_stock(self, agence_id=None):
+        """
+        Vérifie si l'utilisateur est gestionnaire de stock
+        - Si agence_id est fourni: vérifie pour cette agence
+        - Sinon: vérifie s'il est gestionnaire dans au moins une agence
+        """
+        if agence_id:
+            return self.a_role_dans_agence(agence_id, 'gestionnaire_stock')
+        return self.roles_agence.filter(role='gestionnaire_stock', est_actif=True).exists()
+
+    def est_vendeur(self, agence_id=None):
+        """Alias de est_commercial pour compatibilité"""
+        return self.est_commercial(agence_id)
+
+    def a_role_dans_agence(self, agence_id, role):
+        """
+        Vérifie si l'utilisateur a un rôle spécifique dans une agence
+        """
+        if not agence_id:
+            return self.roles_agence.filter(role=role, est_actif=True).exists()
+        return self.roles_agence.filter(agence_id=agence_id, role=role, est_actif=True).exists()
 
     def get_role_dans_agence(self, agence_id):
         """
         Retourne le rôle de l'utilisateur dans une agence spécifique
-
-        Args:
-            agence_id (int): Identifiant de l'agence
-
-        Returns:
-            str or None: Code du rôle ou None si non trouvé
         """
         try:
-            role_agence = self.roles_agence.get(
-                agence_id=agence_id, est_actif=True)
+            role_agence = self.roles_agence.get(agence_id=agence_id, est_actif=True)
             return role_agence.role
         except RoleAgence.DoesNotExist:
             return None
@@ -438,57 +401,65 @@ class CustomUser(AbstractUser):
     def get_role_display_dans_agence(self, agence_id):
         """
         Retourne l'affichage du rôle dans une agence spécifique
-
-        Args:
-            agence_id (int): Identifiant de l'agence
-
-        Returns:
-            str: Libellé du rôle ou "Aucun rôle"
         """
         role = self.get_role_dans_agence(agence_id)
         if role:
             return dict(RoleAgence.ROLE_CHOICES).get(role, role)
         return "Aucun rôle"
 
-    def a_role_dans_agence(self, agence_id, role):
+    # ==================== MÉTHODES D'ACCÈS AUX AGENCES ====================
+    
+    def get_agences(self):
         """
-        Vérifie si l'utilisateur a un rôle spécifique dans une agence
-
-        Args:
-            agence_id (int): Identifiant de l'agence
-            role (str): Code du rôle à vérifier
-
-        Returns:
-            bool: True si l'utilisateur a ce rôle actif dans l'agence
+        Retourne toutes les agences auxquelles l'utilisateur a accès
+        - PDG/DRH: toutes les agences actives
+        - Autres: agences via leurs rôles
         """
-        return self.roles_agence.filter(agence_id=agence_id, role=role, est_actif=True).exists()
+        if self.est_pdg() or self.est_drh():
+            return Agence.objects.filter(est_active=True)
+
+        agences_ids = self.roles_agence.filter(est_actif=True).values_list('agence_id', flat=True)
+        return Agence.objects.filter(id__in=agences_ids, est_active=True)
+
+    def get_agences_par_type(self):
+        """
+        Retourne les agences groupées par type
+        """
+        agences = self.get_agences()
+        return {
+            'principales': agences.filter(type_agence='principale'),
+            'secondaires': agences.filter(type_agence='secondaire'),
+        }
+
+    def get_agence_principale(self):
+        """
+        Retourne l'agence principale de l'utilisateur
+        """
+        if self.agence_principale:
+            return self.agence_principale
+
+        premiere_agence = self.roles_agence.filter(est_actif=True).first()
+        if premiere_agence:
+            return premiere_agence.agence
+        return None
 
     def peut_acceder_agence(self, agence_id):
         """
-        Vérifie si l'utilisateur peut accéder à une agence
-
-        Args:
-            agence_id (int): Identifiant de l'agence
-
-        Returns:
-            bool: True si l'utilisateur a accès
-
-        Note:
-            PDG et DRH ont accès à toutes les agences
+        Vérifie si l'utilisateur peut accéder à une agence spécifique
+        - PDG/DRH: accès à toutes les agences
+        - Autres: vérifie s'il a un rôle dans cette agence
         """
         if self.est_pdg() or self.est_drh():
             return True
+        if not agence_id:
+            return False
         return self.roles_agence.filter(agence_id=agence_id, est_actif=True).exists()
 
+    # ==================== MÉTHODES DE GESTION DES RÔLES ====================
+    
     def get_roles_disponibles_agence(self, agence_id):
         """
         Retourne les rôles disponibles pour une agence spécifique
-
-        Args:
-            agence_id (int): Identifiant de l'agence
-
-        Returns:
-            list: Liste des rôles disponibles ou liste vide si agence inexistante
         """
         try:
             agence = Agence.objects.get(id=agence_id)
@@ -499,13 +470,6 @@ class CustomUser(AbstractUser):
     def peut_assigner_role(self, agence_id, role):
         """
         Vérifie si un rôle peut être assigné dans une agence
-
-        Args:
-            agence_id (int): Identifiant de l'agence
-            role (str): Code du rôle à vérifier
-
-        Returns:
-            bool: True si le rôle est disponible pour cette agence
         """
         try:
             agence = Agence.objects.get(id=agence_id)
@@ -514,41 +478,11 @@ class CustomUser(AbstractUser):
         except Agence.DoesNotExist:
             return False
 
-    def get_agence_principale(self):
-        """
-        Retourne l'agence principale de l'utilisateur
-
-        Returns:
-            Agence or None: Agence principale définie ou première agence associée
-
-        Note:
-            Si aucune agence principale n'est définie, prend la première agence active
-        """
-        if self.agence_principale:
-            return self.agence_principale
-
-        premiere_agence = self.roles_agence.filter(est_actif=True).first()
-        if premiere_agence:
-            return premiere_agence.agence
-
-        return None
-
     def get_all_roles(self):
         """
         Retourne tous les rôles de l'utilisateur avec leurs agences
-
-        Returns:
-            list: Liste de dictionnaires contenant les informations des rôles
-                  [{
-                      'agence_id': int,
-                      'agence_nom': str,
-                      'agence_type': str,
-                      'role': str,
-                      'role_display': str
-                  }]
         """
-        roles = self.roles_agence.filter(
-            est_actif=True).select_related('agence')
+        roles = self.roles_agence.filter(est_actif=True).select_related('agence')
         return [
             {
                 'agence_id': role.agence.id,
@@ -559,6 +493,14 @@ class CustomUser(AbstractUser):
             }
             for role in roles
         ]
+
+    # ==================== MÉTHODES POUR LES PERMISSIONS ====================
+    
+    def has_perm(self, perm, obj=None):
+        """Vérifie si l'utilisateur a une permission spécifique"""
+        if self.est_pdg():
+            return True
+        return super().has_perm(perm, obj)
 
 
 @receiver(reset_password_token_created)

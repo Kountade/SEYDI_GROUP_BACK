@@ -22,23 +22,123 @@ from .serializers import *
 from users.permissions import HasAgenceAccess, IsPDG, IsChefAgence
 from inventaire.models import WarehouseStock, StockMovement
 
+# sales/views.py - ClientViewSet complet
+
+from rest_framework import viewsets, status, filters
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Q
+from .models import Client
+from .serializers import ClientSerializer
+from users.permissions import HasAgenceAccess
+
+# sales/views.py - ClientViewSet sécurisé
+
+from rest_framework import viewsets, status, filters
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Q
+from .models import Client
+from .serializers import ClientSerializer
+from users.permissions import HasAgenceAccess
+
+# sales/views.py - ClientViewSet corrigé
+
+from rest_framework import viewsets, status, filters
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Q
+from .models import Client
+from .serializers import ClientSerializer
+from users.permissions import HasAgenceAccess
+
 
 class ClientViewSet(viewsets.ModelViewSet):
     serializer_class = ClientSerializer
     permission_classes = [IsAuthenticated, HasAgenceAccess]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    search_fields = ['nom', 'prenom', 'email', 'telephone', 'raison_sociale']
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['client_type', 'est_revendeur', 'is_active']
+    search_fields = ['nom', 'prenom', 'email', 'telephone', 'raison_sociale']
+    ordering_fields = ['nom', 'created_at']
     
     def get_queryset(self):
         user = self.request.user
+        
+        # Si l'utilisateur n'est pas authentifié
+        if not user or not user.is_authenticated:
+            return Client.objects.none()
+        
+        # PDG et DRH voient TOUS les clients
         if user.est_pdg() or user.est_drh():
             return Client.objects.all()
-        return Client.objects.filter(is_active=True)
+        
+        # Récupérer les agences de l'utilisateur
+        agences = user.get_agences()
+        
+        if not agences.exists():
+            return Client.objects.none()
+        
+        # Récupérer les IDs des agences
+        agences_ids = list(agences.values_list('id', flat=True))
+        
+        # Pour Chef d'agence et Commercial: clients des ventes de leurs agences
+        # OU clients créés par eux
+        clients = Client.objects.filter(
+            Q(ventes__agence_id__in=agences_ids) |  # Clients qui ont des ventes dans leurs agences
+            Q(created_by=user)  # Clients créés par l'utilisateur
+        ).distinct()
+        
+        return clients
+    
+    def list(self, request, *args, **kwargs):
+        """Liste des clients"""
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
+            
+            # Pagination
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+            
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
-
+        """À la création, associer automatiquement l'agence de l'utilisateur"""
+        user = self.request.user
+        
+        # Récupérer l'agence principale de l'utilisateur
+        agence_principale = user.get_agence_principale()
+        
+        # Sauvegarder le client
+        client = serializer.save(created_by=user)
+        
+        # Optionnel: Créer automatiquement une vente pour associer le client à l'agence
+        # Si vous voulez que le client soit visible immédiatement
+        if agence_principale and not client.ventes.exists():
+            # Créer une petite vente de 0 FCFA pour associer le client à l'agence
+            from .models import Vente
+            Vente.objects.create(
+                agence=agence_principale,
+                client=client,
+                vendeur=user,
+                total=0,
+                montant_du=0,
+                status='completed',
+                notes="Création automatique pour association client-agence"
+            )
 
 class VenteViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasAgenceAccess]
