@@ -1,3 +1,4 @@
+# users/permissions.py
 """
 Permissions personnalisées pour l'application users
 Gestion des accès basés sur les rôles et les agences
@@ -30,10 +31,7 @@ class HasAgenceAccess(BasePermission):
         if hasattr(request.user, 'est_drh') and request.user.est_drh():
             return True
         
-        # ============================================================
-        # CORRECTION : Pour le TransferViewSet, toujours autoriser
-        # car la validation se fait dans le serializer et les actions
-        # ============================================================
+        # Pour le TransferViewSet, toujours autoriser car la validation se fait dans le serializer
         view_name = view.__class__.__name__
         if view_name == 'TransferViewSet':
             return True
@@ -55,14 +53,11 @@ class HasAgenceAccess(BasePermission):
         if hasattr(request.user, 'est_drh') and request.user.est_drh():
             return True
         
-        # ============================================================
-        # CORRECTION : Pour les objets Transfer, vérifier l'accès
-        # à l'agence source OU destination
-        # ============================================================
+        # Pour les objets Transfer, vérifier l'accès à l'agence source OU destination
+        # Import différé pour éviter l'import circulaire
         from inventaire.models import Transfer
         
         if isinstance(obj, Transfer):
-            # L'utilisateur peut voir le transfert s'il a accès à l'agence source OU destination
             has_from_access = request.user.peut_acceder_agence(obj.from_agence_id)
             has_to_access = request.user.peut_acceder_agence(obj.to_agence_id)
             return has_from_access or has_to_access
@@ -91,9 +86,6 @@ class HasAgenceAccess(BasePermission):
         
         # Par défaut, refuser l'accès par sécurité
         return False
-
-
-# ... (le reste des permissions reste inchangé)
 
 
 class IsPDG(BasePermission):
@@ -286,27 +278,20 @@ class CanValidateOrders(BasePermission):
                     return True
         
         return False
-    
-    
-    
 
-# users/permissions.py - Ajoutez cette classe à la fin du fichier
 
 class IsPDGOrChefAgence(BasePermission):
     """
     Permission combinée pour PDG ou Chef d'agence
-    Utilise AND au lieu de OR pour éviter les erreurs d'opérateur
     """
     
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # Vérifier si l'utilisateur est PDG
         if hasattr(request.user, 'est_pdg') and request.user.est_pdg():
             return True
         
-        # Vérifier si l'utilisateur est Chef d'agence
         if hasattr(request.user, 'est_chef_agence') and request.user.est_chef_agence():
             return True
         
@@ -316,19 +301,15 @@ class IsPDGOrChefAgence(BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # PDG a tous les droits
         if hasattr(request.user, 'est_pdg') and request.user.est_pdg():
             return True
         
-        # Chef d'agence - vérifier l'accès à l'objet
         if hasattr(request.user, 'est_chef_agence') and request.user.est_chef_agence():
-            # Si l'objet a un entrepôt, vérifier l'accès à l'agence
+            # Vérification spécifique pour un objet avec entrepôt
             if hasattr(obj, 'warehouse') and obj.warehouse:
                 if hasattr(obj.warehouse, 'agence'):
                     return request.user.peut_acceder_agence(obj.warehouse.agence.id)
-            # Si l'objet a un produit, vérifier l'accès via les prix
             if hasattr(obj, 'product'):
-                # Pour les opérations sur les prix, on vérifie au niveau permission
+                # Pour les prix, on autorise si l'utilisateur a un rôle de chef dans l'agence du produit
                 return True
-        
         return False
