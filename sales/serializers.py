@@ -152,38 +152,45 @@ class FactureDetailSerializer(serializers.ModelSerializer):
             return VenteItemSerializer(obj.vente.items.all(), many=True).data
         return []
 
-
+# sales/serializers.py
 class FactureCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Facture
-        fields = ('vente', 'client', 'agence', 'type_facture', 'date_echeance',
-                  'conditions_paiement', 'notes', 'pied_de_page')
+        fields = ('vente', 'type_facture', 'date_echeance', 'conditions_paiement', 'notes', 'pied_de_page')
         read_only_fields = ('id', 'reference', 'status', 'date_facture', 'cree_par',
-                           'sous_total', 'tva', 'total_ttc', 'montant_paye', 'montant_restant')
+                           'sous_total', 'tva', 'total_ttc', 'montant_paye', 'montant_restant',
+                           'client', 'agence', 'currency')
     
     def validate(self, data):
         vente = data.get('vente')
         if not vente:
             raise serializers.ValidationError({"vente": "La vente est obligatoire"})
+        # Vérifier si une facture existe déjà pour cette vente
+        if Facture.objects.filter(vente=vente).exists():
+            raise serializers.ValidationError({"vente": "Une facture a déjà été générée pour cette vente."})
+        if not vente.agence:
+            raise serializers.ValidationError({"vente": "La vente sélectionnée n'a pas d'agence associée"})
         return data
     
     def create(self, validated_data):
-        user = self.context['request'].user
         vente = validated_data['vente']
-        
-        # Récupère les totaux depuis la vente
-        sous_total = vente.sous_total
-        tva = vente.tva
-        total_ttc = vente.total
+        user = self.context['request'].user
         
         facture = Facture.objects.create(
-            **validated_data,
+            vente=vente,
+            client=vente.client,
+            agence=vente.agence,
             cree_par=user,
-            sous_total=sous_total,
-            tva=tva,
-            total_ttc=total_ttc,
-            montant_restant=total_ttc,
-            montant_paye=0
+            type_facture=validated_data.get('type_facture', 'finale'),
+            date_echeance=validated_data.get('date_echeance'),
+            conditions_paiement=validated_data.get('conditions_paiement', 'Paiement à 30 jours'),
+            notes=validated_data.get('notes', ''),
+            pied_de_page=validated_data.get('pied_de_page', ''),
+            sous_total=vente.sous_total,
+            tva=vente.tva,
+            total_ttc=vente.total,
+            montant_restant=vente.total,
+            montant_paye=vente.montant_paye
         )
         return facture
 
