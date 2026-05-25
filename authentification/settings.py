@@ -32,9 +32,6 @@ CSRF_TRUSTED_ORIGINS = ['https://seydi-group-back.onrender.com',
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
-
-
-
 # Application definition
 
 INSTALLED_APPS = [
@@ -57,7 +54,7 @@ INSTALLED_APPS = [
     "purchases",
     "sales",
     "audit",
-    
+
 ]
 
 MIDDLEWARE = [
@@ -80,7 +77,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
-#npm install && chmod +x node_modules/.bin/vite && npm run build
+# npm install && chmod +x node_modules/.bin/vite && npm run build
 AUTH_USER_MODEL = 'users.CustomUser'
 
 
@@ -147,12 +144,13 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
+
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'bounamakountagoudiaby@gmail.com'
-EMAIL_HOST_PASSWORD = 'ngqjlxsfefxqtier'  # ⚠️ Mot de passe en clair !
+EMAIL_HOST_PASSWORD = 'ngqjlxsfefxqtier'
 
 
 LANGUAGE_CODE = "en-us"

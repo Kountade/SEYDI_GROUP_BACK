@@ -264,43 +264,60 @@ class CustomUser(AbstractUser):
         ('autre', 'Autre'),
     )
 
-    email = models.EmailField(max_length=200, unique=True, verbose_name="Email")
-    birthday = models.DateField(null=True, blank=True, verbose_name="Date de naissance")
-    username = models.CharField(max_length=200, null=True, blank=True, verbose_name="Nom d'utilisateur")
+    email = models.EmailField(
+        max_length=200, unique=True, verbose_name="Email")
+    birthday = models.DateField(
+        null=True, blank=True, verbose_name="Date de naissance")
+    username = models.CharField(
+        max_length=200, null=True, blank=True, verbose_name="Nom d'utilisateur")
 
     # Rôle global
-    role_global = models.CharField(max_length=20, choices=ROLE_GLOBAL_CHOICES, default='autre', verbose_name="Rôle global")
+    role_global = models.CharField(
+        max_length=20, choices=ROLE_GLOBAL_CHOICES, default='autre', verbose_name="Rôle global")
 
     # Département (conservé pour compatibilité)
-    department = models.CharField(max_length=20, null=True, blank=True, verbose_name="Département")
+    department = models.CharField(
+        max_length=20, null=True, blank=True, verbose_name="Département")
 
     # Informations personnelles
-    phone = models.CharField(max_length=20, null=True, blank=True, verbose_name="Téléphone")
+    phone = models.CharField(max_length=20, null=True,
+                             blank=True, verbose_name="Téléphone")
     address = models.TextField(null=True, blank=True, verbose_name="Adresse")
-    city = models.CharField(max_length=100, null=True, blank=True, verbose_name="Ville")
-    country = models.CharField(max_length=100, null=True, blank=True, default='Sénégal', verbose_name="Pays")
-    postal_code = models.CharField(max_length=20, null=True, blank=True, verbose_name="Code postal")
+    city = models.CharField(max_length=100, null=True,
+                            blank=True, verbose_name="Ville")
+    country = models.CharField(
+        max_length=100, null=True, blank=True, default='Sénégal', verbose_name="Pays")
+    postal_code = models.CharField(
+        max_length=20, null=True, blank=True, verbose_name="Code postal")
 
     # Informations professionnelles
-    employee_id = models.CharField(max_length=50, unique=True, null=True, blank=True, verbose_name="Matricule")
-    hire_date = models.DateField(null=True, blank=True, verbose_name="Date d'embauche")
-    contract_type = models.CharField(max_length=50, null=True, blank=True, verbose_name="Type de contrat")
-    salary = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Salaire")
+    employee_id = models.CharField(
+        max_length=50, unique=True, null=True, blank=True, verbose_name="Matricule")
+    hire_date = models.DateField(
+        null=True, blank=True, verbose_name="Date d'embauche")
+    contract_type = models.CharField(
+        max_length=50, null=True, blank=True, verbose_name="Type de contrat")
+    salary = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Salaire")
 
     # Agence principale (optionnel)
-    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True, blank=True, 
+    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True, blank=True,
                                           related_name='utilisateurs_principaux', verbose_name="Agence principale")
 
     # Métadonnées
     is_active = models.BooleanField(default=True, verbose_name="Actif")
-    last_login_ip = models.GenericIPAddressField(null=True, blank=True, verbose_name="Dernière IP")
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
-    updated_at = models.DateTimeField(auto_now=True, verbose_name="Date de modification")
+    last_login_ip = models.GenericIPAddressField(
+        null=True, blank=True, verbose_name="Dernière IP")
+    created_at = models.DateTimeField(
+        auto_now_add=True, verbose_name="Date de création")
+    updated_at = models.DateTimeField(
+        auto_now=True, verbose_name="Date de modification")
     created_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='created_users', verbose_name="Créé par")
 
     # Photo de profil
-    profile_picture = models.ImageField(upload_to='profile_pictures/', null=True, blank=True, verbose_name="Photo de profil")
+    profile_picture = models.ImageField(
+        upload_to='profile_pictures/', null=True, blank=True, verbose_name="Photo de profil")
 
     objects = CustomUserManager()
 
@@ -323,7 +340,7 @@ class CustomUser(AbstractUser):
         return f"{self.email} ({self.get_role_global_display()})"
 
     # ==================== MÉTHODES DE BASE ====================
-    
+
     def get_full_name(self):
         """Retourne le nom complet de l'utilisateur"""
         if self.first_name and self.last_name:
@@ -335,7 +352,7 @@ class CustomUser(AbstractUser):
         return self.get_full_name()
 
     # ==================== MÉTHODES DE RÔLES GLOBAUX ====================
-    
+
     def est_pdg(self):
         """Vérifie si l'utilisateur est PDG"""
         return self.role_global == 'pdg'
@@ -345,7 +362,7 @@ class CustomUser(AbstractUser):
         return self.role_global == 'drh'
 
     # ==================== MÉTHODES DE RÔLES PAR AGENCE ====================
-    
+
     def est_chef_agence(self, agence_id=None):
         """
         Vérifie si l'utilisateur est chef d'agence
@@ -393,7 +410,8 @@ class CustomUser(AbstractUser):
         Retourne le rôle de l'utilisateur dans une agence spécifique
         """
         try:
-            role_agence = self.roles_agence.get(agence_id=agence_id, est_actif=True)
+            role_agence = self.roles_agence.get(
+                agence_id=agence_id, est_actif=True)
             return role_agence.role
         except RoleAgence.DoesNotExist:
             return None
@@ -408,7 +426,7 @@ class CustomUser(AbstractUser):
         return "Aucun rôle"
 
     # ==================== MÉTHODES D'ACCÈS AUX AGENCES ====================
-    
+
     def get_agences(self):
         """
         Retourne toutes les agences auxquelles l'utilisateur a accès
@@ -418,7 +436,8 @@ class CustomUser(AbstractUser):
         if self.est_pdg() or self.est_drh():
             return Agence.objects.filter(est_active=True)
 
-        agences_ids = self.roles_agence.filter(est_actif=True).values_list('agence_id', flat=True)
+        agences_ids = self.roles_agence.filter(
+            est_actif=True).values_list('agence_id', flat=True)
         return Agence.objects.filter(id__in=agences_ids, est_active=True)
 
     def get_agences_par_type(self):
@@ -456,7 +475,7 @@ class CustomUser(AbstractUser):
         return self.roles_agence.filter(agence_id=agence_id, est_actif=True).exists()
 
     # ==================== MÉTHODES DE GESTION DES RÔLES ====================
-    
+
     def get_roles_disponibles_agence(self, agence_id):
         """
         Retourne les rôles disponibles pour une agence spécifique
@@ -482,7 +501,8 @@ class CustomUser(AbstractUser):
         """
         Retourne tous les rôles de l'utilisateur avec leurs agences
         """
-        roles = self.roles_agence.filter(est_actif=True).select_related('agence')
+        roles = self.roles_agence.filter(
+            est_actif=True).select_related('agence')
         return [
             {
                 'agence_id': role.agence.id,
@@ -495,7 +515,7 @@ class CustomUser(AbstractUser):
         ]
 
     # ==================== MÉTHODES POUR LES PERMISSIONS ====================
-    
+
     def has_perm(self, perm, obj=None):
         """Vérifie si l'utilisateur a une permission spécifique"""
         if self.est_pdg():
@@ -505,36 +525,22 @@ class CustomUser(AbstractUser):
 
 @receiver(reset_password_token_created)
 def password_reset_token_created(reset_password_token, *args, **kwargs):
-    """
-    Signal handler pour l'envoi d'email de réinitialisation de mot de passe
-
-    Args:
-        reset_password_token: Token de réinitialisation créé
-        *args: Arguments supplémentaires
-        **kwargs: Arguments nommés supplémentaires
-
-    Note:
-        Cette fonction est appelée automatiquement lors de la création
-        d'un token de réinitialisation de mot de passe
-    """
     sitelink = "http://localhost:5173/"
-    token = reset_password_token.key
-    full_link = f"{sitelink}password-reset/{token}"
+    token = "{}".format(reset_password_token.key)
+    full_link = str(sitelink) + str("password-reset/") + str(token)
 
     context = {
         'full_link': full_link,
-        'email_address': reset_password_token.user.email,
-        'user_name': reset_password_token.user.get_full_name()
+        'email_address': reset_password_token.user.email
     }
 
-    html_message = render_to_string(
-        "users/email/password_reset.html", context=context)
+    html_message = render_to_string("backend/email.html", context=context)
     plain_message = strip_tags(html_message)
 
     msg = EmailMultiAlternatives(
         subject=f"Réinitialisation de mot de passe pour {reset_password_token.user.email}",
         body=plain_message,
-        from_email="noreply@votreentreprise.com",
+        from_email="codelivecamp@gmail.com",
         to=[reset_password_token.user.email]
     )
 
