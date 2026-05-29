@@ -107,13 +107,44 @@ class VenteCreateSerializer(serializers.ModelSerializer):
 class PaiementSerializer(serializers.ModelSerializer):
     encaisse_par_nom = serializers.CharField(
         source='encaisse_par.email', read_only=True)
-    # Nouveaux champs pour les détails
+
+    # Informations de la facture
     facture_ref = serializers.CharField(
         source='facture.reference', read_only=True, default='-')
+    facture_date = serializers.DateField(
+        source='facture.date_facture', read_only=True, default=None)
+    facture_total = serializers.DecimalField(
+        source='facture.total_ttc', max_digits=12, decimal_places=2, read_only=True, default=0)
+    facture_restant = serializers.DecimalField(
+        source='facture.montant_restant', max_digits=12, decimal_places=2, read_only=True, default=0)
+
+    # Informations du client de la facture
     facture_client_nom = serializers.CharField(
         source='facture.client.nom', read_only=True, default='Anonyme')
+    facture_client_prenom = serializers.CharField(
+        source='facture.client.prenom', read_only=True, default='')
+    facture_client_email = serializers.CharField(
+        source='facture.client.email', read_only=True, default='')
+    facture_client_telephone = serializers.CharField(
+        source='facture.client.telephone', read_only=True, default='')
+    facture_client_adresse = serializers.CharField(
+        source='facture.client.adresse', read_only=True, default='')
+    facture_client_raison_sociale = serializers.CharField(
+        source='facture.client.raison_sociale', read_only=True, default='')
+
+    # Informations du client direct (si aucun client de facture)
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default='Anonyme')
+    client_prenom = serializers.CharField(
+        source='client.prenom', read_only=True, default='')
+    client_email = serializers.CharField(
+        source='client.email', read_only=True, default='')
+    client_telephone = serializers.CharField(
+        source='client.telephone', read_only=True, default='')
+    client_adresse = serializers.CharField(
+        source='client.adresse', read_only=True, default='')
+    client_raison_sociale = serializers.CharField(
+        source='client.raison_sociale', read_only=True, default='')
 
     class Meta:
         model = Paiement
