@@ -107,6 +107,13 @@ class VenteCreateSerializer(serializers.ModelSerializer):
 class PaiementSerializer(serializers.ModelSerializer):
     encaisse_par_nom = serializers.CharField(
         source='encaisse_par.email', read_only=True)
+    # Nouveaux champs pour les détails
+    facture_ref = serializers.CharField(
+        source='facture.reference', read_only=True, default='-')
+    facture_client_nom = serializers.CharField(
+        source='facture.client.nom', read_only=True, default='Anonyme')
+    client_nom = serializers.CharField(
+        source='client.nom', read_only=True, default='Anonyme')
 
     class Meta:
         model = Paiement

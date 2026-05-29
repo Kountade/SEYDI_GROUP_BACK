@@ -296,13 +296,16 @@ class PaiementViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.est_pdg() or user.est_drh():
-            return Paiement.objects.all()
-        agences_ids = user.get_agences().values_list('id', flat=True)
-        return Paiement.objects.filter(
-            Q(facture__agence_id__in=agences_ids) |
-            Q(vente__agence_id__in=agences_ids) |
-            Q(client__ventes__agence_id__in=agences_ids)
-        ).distinct()
+            qs = Paiement.objects.all()
+        else:
+            agences_ids = user.get_agences().values_list('id', flat=True)
+            qs = Paiement.objects.filter(
+                Q(facture__agence_id__in=agences_ids) |
+                Q(vente__agence_id__in=agences_ids) |
+                Q(client__ventes__agence_id__in=agences_ids)
+            ).distinct()
+        # Chargement des relations pour éviter les requêtes N+1
+        return qs.select_related('facture__client', 'client', 'encaisse_par')
 
     def perform_create(self, serializer):
         serializer.save()
@@ -372,10 +375,13 @@ class PaiementViewSet(viewsets.ModelViewSet):
 
 class FactureViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasAgenceAccess]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'type_facture', 'client', 'agence', 'montant_restant']  # ✅ ajout de montant_restant
+    filter_backends = [DjangoFilterBackend,
+                       filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'type_facture', 'client',
+                        'agence', 'montant_restant']  # ✅ ajout de montant_restant
     search_fields = ['reference', 'client__nom', 'client__raison_sociale']
-    ordering_fields = ['date_facture', 'date_echeance', 'total_ttc', 'created_at']
+    ordering_fields = ['date_facture',
+                       'date_echeance', 'total_ttc', 'created_at']
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -420,7 +426,8 @@ class FactureViewSet(viewsets.ModelViewSet):
             montant=montant,
             methode=serializer.validated_data['methode'],
             reference_externe=serializer.validated_data.get('reference', ''),
-            notes=serializer.validated_data.get('notes', f'Paiement du {timezone.now().strftime("%d/%m/%Y")}'),
+            notes=serializer.validated_data.get(
+                'notes', f'Paiement du {timezone.now().strftime("%d/%m/%Y")}'),
             encaisse_par=request.user,
             statut='completed'
         )
@@ -493,14 +500,18 @@ class FactureViewSet(viewsets.ModelViewSet):
             }
         factures_impayees = factures.exclude(status__in=['paid', 'cancelled'])
         stats['factures_impayees'] = factures_impayees.count()
-        stats['montant_impayes'] = factures_impayees.aggregate(total=Sum('montant_restant'))['total'] or 0
-        factures_retard = factures.filter(status='overdue', date_echeance__lt=today)
+        stats['montant_impayes'] = factures_impayees.aggregate(
+            total=Sum('montant_restant'))['total'] or 0
+        factures_retard = factures.filter(
+            status='overdue', date_echeance__lt=today)
         stats['factures_en_retard'] = factures_retard.count()
-        stats['montant_en_retard'] = factures_retard.aggregate(total=Sum('montant_restant'))['total'] or 0
+        stats['montant_en_retard'] = factures_retard.aggregate(
+            total=Sum('montant_restant'))['total'] or 0
         start_of_month = today.replace(day=1)
         factures_mois = factures.filter(date_facture__gte=start_of_month)
         stats['factures_mois'] = factures_mois.count()
-        stats['montant_mois'] = factures_mois.aggregate(total=Sum('total_ttc'))['total'] or 0
+        stats['montant_mois'] = factures_mois.aggregate(
+            total=Sum('total_ttc'))['total'] or 0
         return Response(stats)
 
     @action(detail=True, methods=['get'])
@@ -532,7 +543,8 @@ class FactureViewSet(viewsets.ModelViewSet):
         ]))
         elements.append(header_table)
         elements.append(Spacer(1, 0.5*cm))
-        elements.append(Table([['']], colWidths=[16*cm], style=[('LINEBELOW', (0, 0), (-1, -1), 0.5, colors.grey)]))
+        elements.append(Table([['']], colWidths=[
+                        16*cm], style=[('LINEBELOW', (0, 0), (-1, -1), 0.5, colors.grey)]))
         elements.append(Spacer(1, 0.5*cm))
 
         # Infos client / facture
@@ -561,19 +573,22 @@ class FactureViewSet(viewsets.ModelViewSet):
                                   ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('FONTSIZE', (0, 0), (-1, -1), 9)]))
             facture_table.setStyle(TableStyle([('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
                                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('FONTSIZE', (0, 0), (-1, -1), 9)]))
-            two_cols = Table([[client_table, facture_table]], colWidths=[11*cm, 11*cm])
+            two_cols = Table([[client_table, facture_table]],
+                             colWidths=[11*cm, 11*cm])
             two_cols.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP'), ('FONTNAME',
                               (0, 0), (-1, -1), 'Helvetica-Bold'), ('FONTSIZE', (0, 0), (-1, -1), 11)]))
             elements.append(two_cols)
         else:
-            elements.append(Paragraph("Aucun client associé", styles['Normal']))
+            elements.append(
+                Paragraph("Aucun client associé", styles['Normal']))
         elements.append(Spacer(1, 0.5*cm))
 
         # Tableau des articles
         elements.append(Paragraph("ARTICLES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
-                              fontSize=14, textColor=colors.HexColor('#1e40af'), spaceAfter=0.3*cm)))
+                                                             fontSize=14, textColor=colors.HexColor('#1e40af'), spaceAfter=0.3*cm)))
         vente_items = facture.vente.items.all() if facture.vente else []
-        table_data = [['Désignation', 'Référence', 'Qté', 'Prix HT', 'Total TTC']]
+        table_data = [['Désignation', 'Référence',
+                       'Qté', 'Prix HT', 'Total TTC']]
         for item in vente_items:
             table_data.append([item.product.name[:50], item.product.reference[:20], str(item.quantity),
                                f"{item.prix_unitaire:,.0f} FCFA", f"{item.total:,.0f} FCFA"])
@@ -622,22 +637,24 @@ class FactureViewSet(viewsets.ModelViewSet):
         # Conditions, notes, pied de page
         if facture.conditions_paiement:
             elements.append(Paragraph("CONDITIONS DE PAIEMENT", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
-                                    fontSize=14, textColor=colors.HexColor('#1e40af'))))
-            elements.append(Paragraph(facture.conditions_paiement, styles['Normal']))
+                                                                               fontSize=14, textColor=colors.HexColor('#1e40af'))))
+            elements.append(
+                Paragraph(facture.conditions_paiement, styles['Normal']))
             elements.append(Spacer(1, 0.3*cm))
         if facture.notes:
             elements.append(Paragraph("NOTES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
-                                    fontSize=14, textColor=colors.HexColor('#1e40af'))))
+                                                              fontSize=14, textColor=colors.HexColor('#1e40af'))))
             elements.append(Paragraph(facture.notes, styles['Normal']))
             elements.append(Spacer(1, 0.3*cm))
         if facture.pied_de_page:
             elements.append(Paragraph("INFORMATIONS COMPLÉMENTAIRES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
-                                    fontSize=14, textColor=colors.HexColor('#1e40af'))))
+                                                                                     fontSize=14, textColor=colors.HexColor('#1e40af'))))
             elements.append(Paragraph(facture.pied_de_page, styles['Normal']))
             elements.append(Spacer(1, 0.5*cm))
 
         # Signatures
-        signature_data = [['Le Client', 'L\'Entreprise'], ['', ''], ['Signature et cachet', 'Signature et cachet']]
+        signature_data = [['Le Client', 'L\'Entreprise'], [
+            '', ''], ['Signature et cachet', 'Signature et cachet']]
         signature_table = Table(signature_data, colWidths=[8*cm, 8*cm])
         signature_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
@@ -667,6 +684,7 @@ class FactureViewSet(viewsets.ModelViewSet):
         facture = self.get_object()
         serializer = PaiementSerializer(facture.paiements.all(), many=True)
         return Response(serializer.data)
+
 
 class DashboardVentesView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated, HasAgenceAccess]
