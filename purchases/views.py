@@ -14,23 +14,27 @@ from users.permissions import HasAgenceAccess
 from inventaire.models import StockMovement, Warehouse
 
 
+# views.py
+# views.py
 class SupplierViewSet(viewsets.ModelViewSet):
-    """ViewSet pour les fournisseurs"""
-    permission_classes = [IsAuthenticated, HasAgenceAccess]
     queryset = Supplier.objects.all()
+    # ou [IsAuthenticated, HasAgenceAccess] si nécessaire
+    permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
         if self.action == 'list':
             return SupplierListSerializer
-        if self.action == 'retrieve':
+        elif self.action == 'retrieve':
             return SupplierDetailSerializer
         return SupplierCreateUpdateSerializer
 
+    # Supprimer perform_create et perform_update qui utilisaient created_by/updated_by
+    # Ou les laisser vides sans passer d'arguments supplémentaires
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save()  # Ne plus passer created_by
 
     def perform_update(self, serializer):
-        serializer.save(updated_by=self.request.user)
+        serializer.save()  # Ne plus passer updated_by
 
 
 class SupplierEvaluateView(generics.CreateAPIView):
@@ -50,9 +54,9 @@ class SupplierStatisticsView(generics.RetrieveAPIView):
 
     def retrieve(self, request, *args, **kwargs):
         supplier = self.get_object()
-        
+
         orders = supplier.purchase_orders.all()
-        
+
         data = {
             'total_orders': orders.count(),
             'total_spent': orders.filter(status='received').aggregate(total=Sum('total'))['total'] or 0,
@@ -61,7 +65,7 @@ class SupplierStatisticsView(generics.RetrieveAPIView):
             'average_delivery_delay': supplier.average_delivery_delay,
             'products_count': supplier.purchase_orders.values('items__product').distinct().count(),
         }
-        
+
         return Response(data)
 
 
@@ -92,8 +96,9 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        
+        serializer = self.get_serializer(
+            instance, data=request.data, partial=partial)
+
         if serializer.is_valid():
             self.perform_update(serializer)
             return Response(serializer.data)
@@ -102,16 +107,18 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         kwargs['partial'] = True
         instance = self.get_object()
-        
+
         new_status = request.data.get('status')
         old_status = instance.status
-        
+
         # Utiliser le serializer approprié
         if new_status and len(request.data) == 1:
-            serializer = PurchaseOrderUpdateStatusSerializer(instance, data=request.data, partial=True)
+            serializer = PurchaseOrderUpdateStatusSerializer(
+                instance, data=request.data, partial=True)
         else:
-            serializer = self.get_serializer(instance, data=request.data, partial=True)
-        
+            serializer = self.get_serializer(
+                instance, data=request.data, partial=True)
+
         if serializer.is_valid():
             # Gérer les dates associées au changement de statut
             if new_status and new_status != old_status:
@@ -125,13 +132,13 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                     instance.shipped_date = timezone.now().date()
                 elif new_status == 'received' and old_status in ['in_transit', 'partially_received']:
                     instance.received_date = timezone.now().date()
-            
+
             serializer.save()
-            
+
             # Retourner les données complètes
             full_serializer = PurchaseOrderDetailSerializer(instance)
             return Response(full_serializer.data)
-        
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def perform_update(self, serializer):
@@ -144,12 +151,12 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         if order.status != 'draft':
             return Response({'error': 'Seul un brouillon peut être confirmé'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         order.status = 'confirmed'
         order.confirmed_date = timezone.now().date()
         order.validated_by = request.user
         order.save()
-        
+
         return Response(PurchaseOrderDetailSerializer(order).data)
 
     @action(detail=True, methods=['post'])
@@ -158,11 +165,11 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         if order.status != 'confirmed':
             return Response({'error': 'Seule une commande confirmée peut être envoyée'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         order.status = 'sent'
         order.shipped_date = timezone.now().date()
         order.save()
-        
+
         return Response(PurchaseOrderDetailSerializer(order).data)
 
     @action(detail=True, methods=['post'])
@@ -171,10 +178,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         if order.status not in ['confirmed', 'sent']:
             return Response({'error': 'Seule une commande confirmée ou envoyée peut être marquée en transit'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         order.status = 'in_transit'
         order.save()
-        
+
         return Response(PurchaseOrderDetailSerializer(order).data)
 
     @action(detail=True, methods=['post'])
@@ -183,11 +190,11 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         if order.status not in ['in_transit', 'partially_received']:
             return Response({'error': 'Seule une commande en transit ou partiellement reçue peut être marquée reçue'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         order.status = 'received'
         order.received_date = timezone.now().date()
         order.save()
-        
+
         return Response(PurchaseOrderDetailSerializer(order).data)
 
     @action(detail=True, methods=['post'])
@@ -196,10 +203,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         if order.status in ['received', 'cancelled']:
             return Response({'error': 'Cette commande ne peut pas être annulée'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         order.status = 'cancelled'
         order.save()
-        
+
         return Response(PurchaseOrderDetailSerializer(order).data)
 
 
@@ -288,21 +295,21 @@ class WaybillUpdateStatusView(generics.UpdateAPIView):
     def update(self, request, *args, **kwargs):
         waybill = self.get_object()
         new_status = request.data.get('status')
-        
+
         if new_status not in dict(Waybill.STATUS_CHOICES):
             return Response({'error': 'Statut invalide'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         waybill.status = new_status
-        
+
         if new_status == 'arrived':
             waybill.actual_arrival = timezone.now().date()
         elif new_status == 'cleared':
             waybill.customs_clearance_date = timezone.now().date()
         elif new_status == 'delivered':
             waybill.delivery_date = timezone.now().date()
-        
+
         waybill.save()
-        
+
         return Response(WaybillSerializer(waybill).data)
 
 
@@ -350,7 +357,7 @@ class SupplierCatalogImportView(generics.UpdateAPIView):
         catalog = self.get_object()
         catalog.status = 'processing'
         catalog.save()
-        
+
         try:
             catalog.status = 'completed'
             catalog.products_imported = 0
@@ -360,7 +367,7 @@ class SupplierCatalogImportView(generics.UpdateAPIView):
             catalog.error_log = str(e)
             catalog.save()
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         return Response(SupplierCatalogSerializer(catalog).data)
 
 
@@ -384,19 +391,19 @@ class PurchaseDashboardView(generics.GenericAPIView):
 
     def get(self, request):
         user = request.user
-        
+
         if user.est_pdg() or user.est_drh():
             orders = PurchaseOrder.objects.all()
         else:
             agences_ids = user.get_agences().values_list('id', flat=True)
             orders = PurchaseOrder.objects.filter(agence_id__in=agences_ids)
-        
+
         today = timezone.now().date()
         late_orders = orders.filter(
             expected_date__lt=today,
             status__in=['confirmed', 'sent', 'in_transit']
         )
-        
+
         data = {
             'total_orders': orders.count(),
             'total_amount': orders.filter(status='received').aggregate(total=Sum('total'))['total'] or 0,
@@ -407,20 +414,20 @@ class PurchaseDashboardView(generics.GenericAPIView):
             'monthly_spending': self._get_monthly_spending(orders),
             'top_suppliers': self._get_top_suppliers(orders),
         }
-        
+
         return Response(data)
-    
+
     def _get_monthly_spending(self, orders):
         from django.db.models.functions import TruncMonth
-        
+
         monthly = orders.filter(status='received').annotate(
             month=TruncMonth('order_date')
         ).values('month').annotate(
             total=Sum('total')
         ).order_by('-month')[:12]
-        
+
         return list(monthly)
-    
+
     def _get_top_suppliers(self, orders):
         top = orders.filter(status='received').values(
             'supplier__company_name'
@@ -428,5 +435,5 @@ class PurchaseDashboardView(generics.GenericAPIView):
             total=Sum('total'),
             count=Count('id')
         ).order_by('-total')[:5]
-        
+
         return list(top)

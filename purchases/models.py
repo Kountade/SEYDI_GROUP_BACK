@@ -5,169 +5,39 @@ from users.models import CustomUser, Agence
 from produits.models import Product, ProductVariant
 from decimal import Decimal
 
+# models.py
+from django.db import models
+from django.conf import settings
+
 
 class Supplier(models.Model):
-    """Fournisseurs"""
-    # ... (garder tout votre code existant inchangé)
-    SUPPLIER_TYPES = (
-        ('manufacturer', 'Fabricant'),
-        ('distributor', 'Distributeur'),
-        ('wholesaler', 'Grossiste'),
-        ('importer', 'Importateur'),
-        ('service', 'Prestataire de services'),
-    )
-
-    PAYMENT_TERMS = (
-        ('immediate', 'Paiement immédiat'),
-        ('15_days', '15 jours'),
-        ('30_days', '30 jours'),
-        ('45_days', '45 jours'),
-        ('60_days', '60 jours'),
-        ('end_of_month', 'Fin de mois'),
-    )
-
-    DELIVERY_TERMS = (
-        ('exw', 'EXW - Départ usine'),
-        ('fca', 'FCA - Franco transporteur'),
-        ('fas', 'FAS - Franco le long du navire'),
-        ('fob', 'FOB - Franco à bord'),
-        ('cfr', 'CFR - Coût et fret'),
-        ('cif', 'CIF - Coût, assurance et fret'),
-        ('dap', 'DAP - Rendu au lieu de destination'),
-        ('ddu', 'DDU - Droits non acquittés'),
-        ('ddd', 'DDD - Droits acquittés'),
-    )
-
-    # Informations de base
-    code = models.CharField(max_length=50, unique=True,
-                            verbose_name="Code fournisseur")
+    """Fournisseur - version simplifiée (9 champs)"""
+    # Identité
+    code = models.CharField(max_length=20, unique=True, verbose_name="Code")
     company_name = models.CharField(
-        max_length=200, verbose_name="Raison sociale")
-    supplier_type = models.CharField(
-        max_length=20, choices=SUPPLIER_TYPES, default='distributor')
-    registration_number = models.CharField(
-        max_length=50, blank=True, null=True, verbose_name="N° RC/RCCM")
-    tax_id = models.CharField(
-        max_length=50, blank=True, null=True, verbose_name="N° TVA/IFU")
+        max_length=150, verbose_name="Raison sociale")
 
-    # Contact principal
-    contact_name = models.CharField(
-        max_length=200, verbose_name="Personne de contact")
-    contact_title = models.CharField(
-        max_length=100, blank=True, null=True, verbose_name="Fonction")
-    email = models.EmailField()
-    phone = models.CharField(max_length=20)
-    mobile = models.CharField(max_length=20, blank=True, null=True)
-    fax = models.CharField(max_length=20, blank=True, null=True)
-    website = models.URLField(blank=True, null=True)
+    # Contact
+    email = models.EmailField(verbose_name="Email")
+    phone = models.CharField(max_length=20, verbose_name="Téléphone")
+    address = models.TextField(verbose_name="Adresse")
+    city = models.CharField(max_length=100, verbose_name="Ville")
+    country = models.CharField(
+        max_length=50, default="Sénégal", verbose_name="Pays")
 
-    # Adresse
-    address = models.TextField()
-    address_line2 = models.CharField(max_length=200, blank=True, null=True)
-    city = models.CharField(max_length=100)
-    state = models.CharField(max_length=100, blank=True, null=True)
-    postal_code = models.CharField(max_length=20)
-    country = models.CharField(max_length=100, default='Sénégal')
-
-    # Informations bancaires
-    bank_name = models.CharField(max_length=200, blank=True, null=True)
-    bank_account = models.CharField(
-        max_length=50, blank=True, null=True, verbose_name="N° compte")
-    bank_swift = models.CharField(
-        max_length=20, blank=True, null=True, verbose_name="Code SWIFT/BIC")
-    bank_iban = models.CharField(
-        max_length=34, blank=True, null=True, verbose_name="IBAN")
-
-    # Conditions commerciales
-    payment_terms = models.CharField(
-        max_length=20, choices=PAYMENT_TERMS, default='30_days')
-    delivery_terms = models.CharField(
-        max_length=20, choices=DELIVERY_TERMS, default='exw')
-    currency = models.CharField(
-        max_length=10, default='XOF', verbose_name="Devise")
-    lead_time_days = models.IntegerField(
-        default=7, verbose_name="Délai de livraison (jours)")
-    minimum_order_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=0, verbose_name="Montant minimum de commande")
-    discount_rate = models.DecimalField(
-        max_digits=5, decimal_places=2, default=0, verbose_name="Remise (%)")
-
-    # Évaluation et notation
-    RATING_CHOICES = [(i, str(i)) for i in range(1, 6)]
-    rating = models.IntegerField(
-        choices=RATING_CHOICES, null=True, blank=True, verbose_name="Note (1-5)")
-    is_preferred = models.BooleanField(
-        default=False, verbose_name="Fournisseur préféré")
-    performance_score = models.DecimalField(
-        max_digits=5, decimal_places=2, null=True, blank=True, verbose_name="Score de performance")
-
-    # Statistiques
-    total_orders = models.IntegerField(
-        default=0, verbose_name="Total commandes")
-    total_spent = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Total dépensé")
-    average_delivery_delay = models.DecimalField(
-        max_digits=5, decimal_places=2, null=True, blank=True, verbose_name="Retard moyen (jours)")
-    on_time_delivery_rate = models.DecimalField(
-        max_digits=5, decimal_places=2, null=True, blank=True, verbose_name="Taux de livraison à temps (%)")
-
-    # Options
-    is_active = models.BooleanField(default=True)
-    is_blocked = models.BooleanField(default=False)
-    blocking_reason = models.TextField(blank=True, null=True)
+    # Statut
+    is_active = models.BooleanField(default=True, verbose_name="Actif")
 
     # Métadonnées
-    notes = models.TextField(blank=True, null=True)
-    internal_notes = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey(
-        CustomUser, on_delete=models.SET_NULL, null=True, related_name='created_suppliers')
-    updated_by = models.ForeignKey(
-        CustomUser, on_delete=models.SET_NULL, null=True, related_name='updated_suppliers')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    notes = models.TextField(blank=True, verbose_name="Notes")
 
     class Meta:
         ordering = ['company_name']
-        indexes = [
-            models.Index(fields=['code']),
-            models.Index(fields=['company_name']),
-            models.Index(fields=['is_preferred']),
-            models.Index(fields=['rating']),
-        ]
 
     def __str__(self):
         return f"{self.code} - {self.company_name}"
-
-    def update_statistics(self):
-        """Met à jour les statistiques du fournisseur"""
-        from django.db.models import Sum, Avg, Count
-
-        orders = self.purchase_orders.all()
-        self.total_orders = orders.count()
-        self.total_spent = orders.filter(status='received').aggregate(
-            total=Sum('total'))['total'] or 0
-
-        # Calcul du retard moyen
-        delayed_orders = orders.filter(
-            status='received',
-            received_date__gt=models.F('expected_date')
-        )
-        if delayed_orders.exists():
-            total_delay = sum(
-                (order.received_date - order.expected_date).days
-                for order in delayed_orders
-            )
-            self.average_delivery_delay = total_delay / delayed_orders.count()
-
-        # Calcul du taux de livraison à temps
-        received_orders = orders.filter(status='received')
-        if received_orders.exists():
-            on_time = received_orders.filter(
-                received_date__lte=models.F('expected_date')).count()
-            self.on_time_delivery_rate = (
-                on_time / received_orders.count()) * 100
-
-        self.save()
 
 
 class SupplierContact(models.Model):
@@ -273,7 +143,7 @@ class PurchaseOrder(models.Model):
         related_name='purchase_orders',
         verbose_name="Agence destinataire"
     )
-    
+
     warehouse = models.ForeignKey(
         'inventaire.Warehouse',
         on_delete=models.SET_NULL,
@@ -282,7 +152,7 @@ class PurchaseOrder(models.Model):
         related_name='purchase_orders',
         verbose_name="Entrepôt de réception"
     )
-    
+
     supplier = models.ForeignKey(
         Supplier, on_delete=models.PROTECT, related_name='purchase_orders')
     created_by = models.ForeignKey(
@@ -351,8 +221,9 @@ class PurchaseOrder(models.Model):
     def save(self, *args, **kwargs):
         # NOUVEAU : Validation : warehouse doit appartenir à l'agence
         if self.warehouse and self.agence and self.warehouse.agence != self.agence:
-            raise ValidationError("L'entrepôt doit appartenir à l'agence de la commande")
-        
+            raise ValidationError(
+                "L'entrepôt doit appartenir à l'agence de la commande")
+
         if not self.order_number:
             last_order = PurchaseOrder.objects.order_by('-id').first()
             if last_order:
@@ -483,24 +354,24 @@ class Transporter(models.Model):
     """Transporteur / Logisticien"""
     name = models.CharField(max_length=200)
     code = models.CharField(max_length=50, unique=True)
-    
+
     contact_person = models.CharField(max_length=200, blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
-    
+
     address = models.TextField(blank=True, null=True)
     city = models.CharField(max_length=100, blank=True, null=True)
-    
+
     is_active = models.BooleanField(default=True)
     is_preferred = models.BooleanField(default=False)
-    
+
     notes = models.TextField(blank=True, null=True)
-    
+
     class Meta:
         ordering = ['name']
         verbose_name = "Transporteur"
         verbose_name_plural = "Transporteurs"
-    
+
     def __str__(self):
         return self.name
 
@@ -516,57 +387,61 @@ class Waybill(models.Model):
         ('delivered', 'Livré'),
         ('cancelled', 'Annulé'),
     )
-    
+
     waybill_number = models.CharField(max_length=100, unique=True)
-    
+
     purchase_order = models.ForeignKey(
-        PurchaseOrder, 
-        on_delete=models.CASCADE, 
+        PurchaseOrder,
+        on_delete=models.CASCADE,
         related_name='waybills'
     )
     transporter = models.ForeignKey(
-        Transporter, 
-        on_delete=models.PROTECT, 
+        Transporter,
+        on_delete=models.PROTECT,
         related_name='waybills'
     )
-    
+
     issue_date = models.DateField()
     estimated_arrival = models.DateField(null=True, blank=True)
     actual_arrival = models.DateField(null=True, blank=True)
     customs_clearance_date = models.DateField(null=True, blank=True)
     delivery_date = models.DateField(null=True, blank=True)
-    
+
     origin = models.CharField(max_length=200)
     destination = models.CharField(max_length=200)
     port_of_loading = models.CharField(max_length=200, blank=True, null=True)
     port_of_discharge = models.CharField(max_length=200, blank=True, null=True)
-    
+
     container_number = models.CharField(max_length=50, blank=True, null=True)
     seal_number = models.CharField(max_length=50, blank=True, null=True)
     number_of_packages = models.IntegerField(default=1)
-    weight_kg = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    volume_m3 = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
-    
-    waybill_file = models.FileField(upload_to='waybills/', null=True, blank=True)
-    
+    weight_kg = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True)
+    volume_m3 = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True)
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='draft')
+
+    waybill_file = models.FileField(
+        upload_to='waybills/', null=True, blank=True)
+
     notes = models.TextField(blank=True, null=True)
-    
+
     created_by = models.ForeignKey(
-        CustomUser, 
-        on_delete=models.SET_NULL, 
-        null=True, 
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
         related_name='created_waybills'
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         ordering = ['-issue_date']
         verbose_name = "Bon de transport"
         verbose_name_plural = "Bons de transport"
-    
+
     def __str__(self):
         return f"{self.waybill_number} - {self.transporter.name}"
 
@@ -584,47 +459,50 @@ class ReceiptCost(models.Model):
         ('transit_fees', 'Frais de transit'),
         ('other', 'Autres frais'),
     )
-    
+
     receipt = models.ForeignKey(
-        PurchaseReceipt, 
-        on_delete=models.CASCADE, 
+        PurchaseReceipt,
+        on_delete=models.CASCADE,
         related_name='costs'
     )
-    
+
     cost_type = models.CharField(max_length=20, choices=COST_TYPES)
     description = models.CharField(max_length=200, blank=True, null=True)
-    
+
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=10, default='XOF')
-    exchange_rate = models.DecimalField(max_digits=10, decimal_places=4, default=1.0)
+    exchange_rate = models.DecimalField(
+        max_digits=10, decimal_places=4, default=1.0)
     amount_in_local_currency = models.DecimalField(
-        max_digits=12, 
-        decimal_places=2, 
+        max_digits=12,
+        decimal_places=2,
         editable=False
     )
-    
+
     reference_number = models.CharField(
-        max_length=100, 
-        blank=True, 
-        null=True, 
+        max_length=100,
+        blank=True,
+        null=True,
         verbose_name="N° de référence"
     )
-    document = models.FileField(upload_to='receipt_costs/', null=True, blank=True)
-    
-    is_billable = models.BooleanField(default=True, verbose_name="Facturable au client")
-    
+    document = models.FileField(
+        upload_to='receipt_costs/', null=True, blank=True)
+
+    is_billable = models.BooleanField(
+        default=True, verbose_name="Facturable au client")
+
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         ordering = ['cost_type']
         verbose_name = "Frais de réception"
         verbose_name_plural = "Frais de réception"
-    
+
     def save(self, *args, **kwargs):
         self.amount_in_local_currency = self.amount * self.exchange_rate
         super().save(*args, **kwargs)
-    
+
     def __str__(self):
         return f"{self.get_cost_type_display()} - {self.amount} {self.currency}"
 
@@ -638,13 +516,13 @@ class ReceiptCostAllocation(models.Model):
         ('value', 'Par valeur'),
         ('equal', 'De manière égale'),
     )
-    
+
     receipt_cost = models.ForeignKey(
         ReceiptCost,
         on_delete=models.CASCADE,
         related_name='allocations'
     )
-    
+
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     variant = models.ForeignKey(
         ProductVariant,
@@ -652,16 +530,16 @@ class ReceiptCostAllocation(models.Model):
         null=True,
         blank=True
     )
-    
+
     quantity = models.IntegerField(validators=[MinValueValidator(1)])
     allocated_amount = models.DecimalField(max_digits=12, decimal_places=2)
     allocation_method = models.CharField(max_length=20, choices=METHOD_CHOICES)
-    
+
     class Meta:
         unique_together = ['receipt_cost', 'product', 'variant']
         verbose_name = "Allocation de frais"
         verbose_name_plural = "Allocations de frais"
-    
+
     def __str__(self):
         return f"{self.product.name} - {self.allocated_amount}"
 

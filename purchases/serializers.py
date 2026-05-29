@@ -1,3 +1,4 @@
+from .models import Supplier
 from django.utils import timezone
 from rest_framework import serializers
 from .models import *
@@ -18,40 +19,47 @@ class SupplierContactSerializer(serializers.ModelSerializer):
 
 
 class SupplierListSerializer(serializers.ModelSerializer):
-    supplier_type_display = serializers.CharField(source='get_supplier_type_display', read_only=True)
+    supplier_type_display = serializers.CharField(
+        source='get_supplier_type_display', read_only=True)
 
+# serializers.py (version simplifiée)
+
+
+class SupplierListSerializer(serializers.ModelSerializer):
+    """Sérializer pour la liste des fournisseurs (champs essentiels)"""
     class Meta:
         model = Supplier
-        fields = ('id', 'code', 'company_name', 'supplier_type', 'supplier_type_display',
-                  'contact_name', 'email', 'phone', 'city', 'country',
-                  'rating', 'is_preferred', 'is_active', 'total_orders')
+        fields = (
+            'id', 'code', 'company_name', 'email', 'phone',
+            'city', 'country', 'is_active'
+        )
 
 
 class SupplierDetailSerializer(serializers.ModelSerializer):
-    contacts = SupplierContactSerializer(many=True, read_only=True)
-    evaluations = serializers.SerializerMethodField()
-    payment_terms_display = serializers.CharField(source='get_payment_terms_display', read_only=True)
-    delivery_terms_display = serializers.CharField(source='get_delivery_terms_display', read_only=True)
-
+    """Sérializer pour le détail d'un fournisseur (tous les champs)"""
     class Meta:
         model = Supplier
-        fields = '__all__'
-
-    def get_evaluations(self, obj):
-        return SupplierEvaluationSerializer(obj.evaluations.all()[:5], many=True).data
+        fields = (
+            'id', 'code', 'company_name', 'email', 'phone',
+            'address', 'city', 'country', 'is_active', 'notes',
+            'created_at', 'updated_at'
+        )
+        read_only_fields = ('created_at', 'updated_at')
 
 
 class SupplierCreateUpdateSerializer(serializers.ModelSerializer):
+    """Sérializer pour la création/modification"""
     class Meta:
         model = Supplier
-        fields = '__all__'
-        read_only_fields = ('created_at', 'updated_at', 'created_by', 'updated_by',
-                            'total_orders', 'total_spent', 'average_delivery_delay',
-                            'on_time_delivery_rate')
+        fields = (
+            'code', 'company_name', 'email', 'phone',
+            'address', 'city', 'country', 'is_active', 'notes'
+        )
 
 
 class SupplierEvaluationSerializer(serializers.ModelSerializer):
-    evaluator_name = serializers.CharField(source='evaluator.email', read_only=True)
+    evaluator_name = serializers.CharField(
+        source='evaluator.email', read_only=True)
 
     class Meta:
         model = SupplierEvaluation
@@ -61,22 +69,30 @@ class SupplierEvaluationSerializer(serializers.ModelSerializer):
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    product_reference = serializers.CharField(source='product.reference', read_only=True)
-    remaining = serializers.IntegerField(source='remaining_quantity', read_only=True)
+    product_reference = serializers.CharField(
+        source='product.reference', read_only=True)
+    remaining = serializers.IntegerField(
+        source='remaining_quantity', read_only=True)
 
     class Meta:
         model = PurchaseOrderItem
         fields = '__all__'
-        read_only_fields = ('subtotal', 'tax_amount', 'total', 'created_at', 'purchase_order')
+        read_only_fields = ('subtotal', 'tax_amount',
+                            'total', 'created_at', 'purchase_order')
 
 
 class PurchaseOrderListSerializer(serializers.ModelSerializer):
-    supplier_name = serializers.CharField(source='supplier.company_name', read_only=True)
+    supplier_name = serializers.CharField(
+        source='supplier.company_name', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    urgency_display = serializers.CharField(source='get_urgency_display', read_only=True)
-    items_count = serializers.IntegerField(source='items.count', read_only=True)
-    warehouse_name = serializers.CharField(source='warehouse.name', read_only=True, default=None)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
+    urgency_display = serializers.CharField(
+        source='get_urgency_display', read_only=True)
+    items_count = serializers.IntegerField(
+        source='items.count', read_only=True)
+    warehouse_name = serializers.CharField(
+        source='warehouse.name', read_only=True, default=None)
     items = serializers.SerializerMethodField()
 
     class Meta:
@@ -191,20 +207,22 @@ class PurchaseOrderCreateUpdateSerializer(serializers.ModelSerializer):
         if items_data is not None:
             instance.items.all().delete()
             for item_data in items_data:
-                PurchaseOrderItem.objects.create(purchase_order=instance, **item_data)
+                PurchaseOrderItem.objects.create(
+                    purchase_order=instance, **item_data)
 
         instance.calculate_totals()
         return instance
 
 # Ajoutez dans serializers.py
 
+
 class PurchaseOrderUpdateStatusSerializer(serializers.ModelSerializer):
     """Serializer spécifique pour la mise à jour du statut"""
-    
+
     class Meta:
         model = PurchaseOrder
         fields = ['status']
-    
+
     def validate_status(self, value):
         instance = self.instance
         if instance:
@@ -215,7 +233,7 @@ class PurchaseOrderUpdateStatusSerializer(serializers.ModelSerializer):
                 'in_transit': ['partially_received', 'received'],
                 'partially_received': ['received'],
             }
-            
+
             current_status = instance.status
             if current_status in allowed_transitions:
                 if value not in allowed_transitions[current_status]:
@@ -226,12 +244,17 @@ class PurchaseOrderUpdateStatusSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     f"Impossible de modifier le statut: la commande est {dict(PurchaseOrder.STATUS_CHOICES).get(current_status, current_status)}"
                 )
-        
+
         return value
+
+
 class PurchaseReceiptItemSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='order_item.product.name', read_only=True)
-    product_reference = serializers.CharField(source='order_item.product.reference', read_only=True)
-    product_id = serializers.IntegerField(source='order_item.product.id', read_only=True)
+    product_name = serializers.CharField(
+        source='order_item.product.name', read_only=True)
+    product_reference = serializers.CharField(
+        source='order_item.product.reference', read_only=True)
+    product_id = serializers.IntegerField(
+        source='order_item.product.id', read_only=True)
 
     class Meta:
         model = PurchaseReceiptItem
@@ -239,10 +262,12 @@ class PurchaseReceiptItemSerializer(serializers.ModelSerializer):
 
 # Ajoutez ou modifiez dans serializers.py
 
+
 class PurchaseReceiptSerializer(serializers.ModelSerializer):
     items = PurchaseReceiptItemSerializer(many=True, read_only=True)
-    received_by_name = serializers.CharField(source='received_by.email', read_only=True)
-    
+    received_by_name = serializers.CharField(
+        source='received_by.email', read_only=True)
+
     # Ajoutez ces champs calculés
     total_value = serializers.SerializerMethodField()
     total_costs = serializers.SerializerMethodField()
@@ -265,7 +290,8 @@ class PurchaseReceiptSerializer(serializers.ModelSerializer):
     def get_total_costs(self, obj):
         """Calcule le total des frais annexes"""
         # Si vous avez des frais liés à la réception
-        total = obj.costs.aggregate(total=models.Sum('amount_in_local_currency'))['total']
+        total = obj.costs.aggregate(total=models.Sum(
+            'amount_in_local_currency'))['total']
         return total or 0
 
     def get_supplier_name(self, obj):
@@ -332,7 +358,8 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 })
 
             try:
-                order_item = PurchaseOrderItem.objects.get(id=item['order_item'])
+                order_item = PurchaseOrderItem.objects.get(
+                    id=item['order_item'])
                 item['order_item_obj'] = order_item
 
                 if order_item.remaining_quantity < quantity:
@@ -456,9 +483,11 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                         is_default=True
                     ).first()
                     if not warehouse:
-                        warehouse = Warehouse.objects.filter(agence=purchase_order.agence).first()
+                        warehouse = Warehouse.objects.filter(
+                            agence=purchase_order.agence).first()
                     if not warehouse:
-                        raise Exception(f"Aucun entrepôt configuré pour l'agence {purchase_order.agence.nom}")
+                        raise Exception(
+                            f"Aucun entrepôt configuré pour l'agence {purchase_order.agence.nom}")
 
                 # Créer un mouvement de stock
                 stock_movement = StockMovement.objects.create(
@@ -512,17 +541,20 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 return stock_movement
 
         except Exception as e:
-            raise serializers.ValidationError(f"Erreur lors de la mise à jour du stock: {str(e)}")
+            raise serializers.ValidationError(
+                f"Erreur lors de la mise à jour du stock: {str(e)}")
 
 # Dans serializers.py - Modifiez PurchaseReceiptDetailSerializer
 
+
 class PurchaseReceiptDetailSerializer(serializers.ModelSerializer):
     items = PurchaseReceiptItemSerializer(many=True, read_only=True)
-    received_by_name = serializers.CharField(source='received_by.email', read_only=True)
+    received_by_name = serializers.CharField(
+        source='received_by.email', read_only=True)
     costs = serializers.SerializerMethodField()
     # waybills = serializers.SerializerMethodField()  # ← COMMENTEZ OU SUPPRIMEZ CETTE LIGNE
     total_costs = serializers.SerializerMethodField()
-    
+
     # Ajoutez ces champs
     total_value = serializers.SerializerMethodField()
     supplier_name = serializers.SerializerMethodField()
@@ -541,9 +573,10 @@ class PurchaseReceiptDetailSerializer(serializers.ModelSerializer):
     #     return WaybillSerializer(obj.waybills.all(), many=True).data
 
     def get_total_costs(self, obj):
-        total = obj.costs.aggregate(total=models.Sum('amount_in_local_currency'))['total']
+        total = obj.costs.aggregate(total=models.Sum(
+            'amount_in_local_currency'))['total']
         return total or 0
-    
+
     def get_total_value(self, obj):
         """Calcule la valeur totale des marchandises reçues"""
         total = 0
@@ -557,6 +590,7 @@ class PurchaseReceiptDetailSerializer(serializers.ModelSerializer):
     def get_order_number(self, obj):
         return obj.purchase_order.order_number if obj.purchase_order else None
 
+
 class TransporterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transporter
@@ -564,9 +598,12 @@ class TransporterSerializer(serializers.ModelSerializer):
 
 
 class WaybillSerializer(serializers.ModelSerializer):
-    transporter_name = serializers.CharField(source='transporter.name', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.email', read_only=True)
+    transporter_name = serializers.CharField(
+        source='transporter.name', read_only=True)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
+    created_by_name = serializers.CharField(
+        source='created_by.email', read_only=True)
 
     class Meta:
         model = Waybill
@@ -575,8 +612,10 @@ class WaybillSerializer(serializers.ModelSerializer):
 
 
 class ReceiptCostSerializer(serializers.ModelSerializer):
-    cost_type_display = serializers.CharField(source='get_cost_type_display', read_only=True)
-    receipt_number = serializers.CharField(source='receipt.receipt_number', read_only=True)
+    cost_type_display = serializers.CharField(
+        source='get_cost_type_display', read_only=True)
+    receipt_number = serializers.CharField(
+        source='receipt.receipt_number', read_only=True)
 
     class Meta:
         model = ReceiptCost
@@ -586,7 +625,8 @@ class ReceiptCostSerializer(serializers.ModelSerializer):
 
 class ReceiptCostAllocationSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    allocation_method_display = serializers.CharField(source='get_allocation_method_display', read_only=True)
+    allocation_method_display = serializers.CharField(
+        source='get_allocation_method_display', read_only=True)
 
     class Meta:
         model = ReceiptCostAllocation
@@ -595,7 +635,8 @@ class ReceiptCostAllocationSerializer(serializers.ModelSerializer):
 
 class PurchasePriceHistorySerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    supplier_name = serializers.CharField(source='supplier.company_name', read_only=True)
+    supplier_name = serializers.CharField(
+        source='supplier.company_name', read_only=True)
 
     class Meta:
         model = PurchasePriceHistory
@@ -603,14 +644,18 @@ class PurchasePriceHistorySerializer(serializers.ModelSerializer):
 
 
 class SupplierCatalogSerializer(serializers.ModelSerializer):
-    supplier_name = serializers.CharField(source='supplier.company_name', read_only=True)
-    imported_by_name = serializers.CharField(source='imported_by.email', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    supplier_name = serializers.CharField(
+        source='supplier.company_name', read_only=True)
+    imported_by_name = serializers.CharField(
+        source='imported_by.email', read_only=True)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
 
     class Meta:
         model = SupplierCatalog
         fields = '__all__'
-        read_only_fields = ('import_date', 'imported_by', 'products_imported', 'status', 'error_log')
+        read_only_fields = ('import_date', 'imported_by',
+                            'products_imported', 'status', 'error_log')
 
 
 class SupplierCatalogImportSerializer(serializers.Serializer):
@@ -623,8 +668,10 @@ class SupplierCatalogImportSerializer(serializers.Serializer):
 
 class PurchaseAlertSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    supplier_name = serializers.CharField(source='supplier.company_name', read_only=True)
-    alert_type_display = serializers.CharField(source='get_alert_type_display', read_only=True)
+    supplier_name = serializers.CharField(
+        source='supplier.company_name', read_only=True)
+    alert_type_display = serializers.CharField(
+        source='get_alert_type_display', read_only=True)
 
     class Meta:
         model = PurchaseAlert
@@ -634,7 +681,8 @@ class PurchaseAlertSerializer(serializers.ModelSerializer):
 class PurchaseOrderStatsSerializer(serializers.Serializer):
     total_orders = serializers.IntegerField()
     total_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
-    average_order_value = serializers.DecimalField(max_digits=10, decimal_places=2)
+    average_order_value = serializers.DecimalField(
+        max_digits=10, decimal_places=2)
     pending_orders = serializers.IntegerField()
     late_orders = serializers.IntegerField()
     top_suppliers = serializers.ListField(child=serializers.DictField())
