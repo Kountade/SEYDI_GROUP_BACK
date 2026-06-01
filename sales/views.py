@@ -11,6 +11,9 @@ from django.db import transaction
 from decimal import Decimal
 from io import BytesIO
 from django.http import HttpResponse
+from rest_framework.decorators import action
+from rest_framework import status
+
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -371,7 +374,236 @@ class PaiementViewSet(viewsets.ModelViewSet):
         return Response(stats_data)
 
 
+class DevisViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasAgenceAccess]
+    filter_backends = [DjangoFilterBackend,
+                       filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'agence', 'client']
+    search_fields = ['reference', 'client__nom', 'client__raison_sociale']
+    ordering_fields = ['date_creation', 'date_expiration', 'total']
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return DevisListSerializer
+        if self.action == 'retrieve':
+            return DevisDetailSerializer
+        if self.action == 'create':
+            return DevisCreateSerializer
+        return DevisDetailSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.est_pdg() or user.est_drh():
+            return Devis.objects.all()
+        return Devis.objects.filter(agence__in=user.get_agences())
+
+    @action(detail=True, methods=['post'])
+    def envoyer(self, request, pk=None):
+        devis = self.get_object()
+        if devis.status != 'draft':
+            return Response({'error': f'Seul un devis brouillon peut être envoyé. Statut actuel : {devis.status}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        devis.status = 'sent'
+        devis.save()
+        # Ici vous pouvez ajouter l'envoi d'email (si nécessaire)
+        return Response({'success': True, 'message': 'Devis envoyé avec succès', 'status': devis.status})
+
+    @action(detail=True, methods=['post'])
+    def accepter(self, request, pk=None):
+        devis = self.get_object()
+        if devis.status != 'sent':
+            return Response({'error': f'Seul un devis envoyé peut être accepté. Statut actuel : {devis.status}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if devis.date_expiration < timezone.now().date():
+            devis.status = 'expired'
+            devis.save()
+            return Response({'error': 'Ce devis est expiré, il ne peut pas être accepté.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        devis.status = 'accepted'
+        devis.save()
+        return Response({'success': True, 'message': 'Devis accepté par le client', 'status': devis.status})
+
+    @action(detail=True, methods=['post'])
+    def refuser(self, request, pk=None):
+        devis = self.get_object()
+        if devis.status not in ('draft', 'sent'):
+            return Response({'error': 'Seul un devis en cours peut être refusé.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        motif = request.data.get('motif', '')
+        devis.status = 'refused'
+        if motif:
+            devis.notes = f"{devis.notes or ''}\nRefusé le {timezone.now().strftime('%d/%m/%Y')} - Motif: {motif}"
+        devis.save()
+        return Response({'success': True, 'message': 'Devis refusé'})
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def convertir_en_vente(self, request, pk=None):
+        devis = self.get_object()
+        if devis.status != 'accepted':
+            return Response({'error': f'Seul un devis accepté peut être converti en vente. Statut actuel : {devis.status}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not devis.client:
+            return Response({'error': 'Ce devis n\'a pas de client associé, impossible de créer une vente.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Créer la vente à partir du devis
+        vente = Vente.objects.create(
+            agence=devis.agence,
+            client=devis.client,
+            vendeur=devis.vendeur,
+            type_vente='livraison',  # ou autre selon votre logique
+            status='draft',
+            sous_total=devis.sous_total,
+            remise=devis.remise,
+            remise_percentage=devis.remise_percentage,
+            tva=devis.tva,
+            total=devis.total,
+            montant_du=devis.total,
+            notes=f"Vente issue du devis {devis.reference}\n{devis.notes or ''}"
+        )
+
+        # Copier les lignes du devis vers la vente
+        for item in devis.items.all():
+            VenteItem.objects.create(
+                vente=vente,
+                product=item.product,
+                variant=item.variant,
+                quantity=item.quantity,
+                prix_unitaire=item.prix_unitaire,
+                remise=item.remise,
+                tva=item.tva,
+                total=item.total
+            )
+
+        # Marquer le devis comme converti
+        devis.status = 'converted'
+        devis.save()
+
+        # Retourner les détails de la nouvelle vente
+        serializer = VenteDetailSerializer(vente, context={'request': request})
+        return Response({
+            'success': True,
+            'message': 'Devis converti en vente avec succès',
+            'vente': serializer.data
+        })
+
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        """Génère un PDF du devis (similaire à la facture)"""
+        devis = self.get_object()
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm,
+                                leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+        styles = getSampleStyleSheet()
+        elements = []
+
+        # En-tête
+        header_data = [
+            ['SEYDI GROUP SARL', f'DEVIS {devis.reference}'],
+            ['Solutions Digitales', ''],
+            ['Dakar, Sénégal', ''],
+            ['Tél: +221 33 123 45 67', ''],
+            ['Email: contact@seydigroup.com', '']
+        ]
+        header_table = Table(header_data, colWidths=[8*cm, 8*cm])
+        header_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (0, 0), 16),
+            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+            ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (1, 0), (1, 0), 18),
+        ]))
+        elements.append(header_table)
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Infos client / devis
+        if devis.client:
+            denomination = devis.client.raison_sociale or devis.client.nom
+            if devis.client.prenom:
+                denomination = f"{devis.client.nom} {devis.client.prenom}"
+            client_details = [
+                ['Client :', denomination],
+                ['Adresse :', devis.client.adresse or '-'],
+                ['Tél :', devis.client.telephone or '-'],
+                ['Email :', devis.client.email or '-'],
+            ]
+            devis_details = [
+                ['Date :', devis.date_creation.strftime('%d/%m/%Y')],
+                ['Expiration :', devis.date_expiration.strftime('%d/%m/%Y')],
+                ['Statut :', devis.get_status_display()],
+                ['Agence :', devis.agence.nom],
+            ]
+            client_table = Table(client_details, colWidths=[4*cm, 7*cm])
+            devis_table = Table(devis_details, colWidths=[4*cm, 7*cm])
+            two_cols = Table([[client_table, devis_table]],
+                             colWidths=[11*cm, 11*cm])
+            elements.append(two_cols)
+        else:
+            elements.append(
+                Paragraph("Aucun client associé", styles['Normal']))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Tableau des articles
+        elements.append(Paragraph("ARTICLES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
+                                                             fontSize=14, textColor=colors.HexColor('#1e40af'))))
+        table_data = [['Désignation', 'Référence',
+                       'Qté', 'Prix HT', 'Total TTC']]
+        for item in devis.items.all():
+            table_data.append([item.product.name[:50], item.product.reference[:20], str(item.quantity),
+                               f"{item.prix_unitaire:,.0f} FCFA", f"{item.total:,.0f} FCFA"])
+        col_widths = [6*cm, 3*cm, 1.5*cm, 3*cm, 3*cm]
+        table = Table(table_data, colWidths=col_widths, repeatRows=1)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e40af')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ]))
+        elements.append(table)
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Totaux
+        totals_data = [
+            ['Sous-total HT :', f"{devis.sous_total:,.0f} FCFA"],
+            ['TVA (18%) :', f"{devis.tva:,.0f} FCFA"],
+            ['TOTAL TTC :', f"{devis.total:,.0f} FCFA"],
+        ]
+        totals_table = Table(totals_data, colWidths=[8*cm, 6*cm])
+        totals_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('FONTNAME', (0, 2), (1, 2), 'Helvetica-Bold'),
+            ('LINEABOVE', (0, 2), (-1, 2), 0.5, colors.grey),
+        ]))
+        elements.append(totals_table)
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Conditions et notes
+        if devis.conditions:
+            elements.append(Paragraph("CONDITIONS", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
+                                                                   fontSize=14, textColor=colors.HexColor('#1e40af'))))
+            elements.append(Paragraph(devis.conditions, styles['Normal']))
+            elements.append(Spacer(1, 0.3*cm))
+        if devis.notes:
+            elements.append(Paragraph("NOTES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
+                                                              fontSize=14, textColor=colors.HexColor('#1e40af'))))
+            elements.append(Paragraph(devis.notes, styles['Normal']))
+
+        # Pied de page
+        footer_text = f'<para align="center" fontSize="8" textColor="gray">Devis valable jusqu’au {devis.date_expiration.strftime("%d/%m/%Y")}.<br/>SEYDI GROUP SARL - RCCM: SN DKR 2023 B 123 - Généré le {timezone.now().strftime("%d/%m/%Y à %H:%M")}</para>'
+        elements.append(Paragraph(footer_text, styles['Normal']))
+
+        doc.build(elements)
+        pdf = buffer.getvalue()
+        buffer.close()
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'inline; filename="devis_{devis.reference}.pdf"'
+        return response
 # sales/views.py - FactureViewSet complet corrigé
+
 
 class FactureViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasAgenceAccess]

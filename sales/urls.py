@@ -7,10 +7,12 @@ from .views import *
 router = DefaultRouter()
 router.register('clients', ClientViewSet, basename='clients')
 router.register('ventes', VenteViewSet, basename='ventes')
+router.register('devis', DevisViewSet, basename='devis')
 router.register('paiements', PaiementViewSet, basename='paiements')
 router.register('factures', FactureViewSet, basename='factures')
 
 urlpatterns = [
     path('', include(router.urls)),
-    path('dashboard/ventes/', DashboardVentesView.as_view(), name='dashboard-ventes'),
+    path('dashboard/ventes/', DashboardVentesView.as_view(),
+         name='dashboard-ventes'),
 ]

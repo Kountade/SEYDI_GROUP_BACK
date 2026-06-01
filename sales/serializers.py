@@ -104,6 +104,96 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         return vente
 
 
+class DevisItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_reference = serializers.CharField(
+        source='product.reference', read_only=True)
+
+    class Meta:
+        model = DevisItem
+        fields = ('id', 'product', 'product_name', 'product_reference', 'variant',
+                  'quantity', 'prix_unitaire', 'remise', 'tva', 'total')
+        read_only_fields = ('id', 'total')
+
+
+class DevisListSerializer(serializers.ModelSerializer):
+    client_nom = serializers.CharField(
+        source='client.nom', read_only=True, allow_null=True)
+    agence_nom = serializers.CharField(source='agence.nom', read_only=True)
+    vendeur_nom = serializers.CharField(source='vendeur.email', read_only=True)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
+
+    class Meta:
+        model = Devis
+        fields = ('id', 'reference', 'client_nom', 'agence_nom', 'vendeur_nom', 'status',
+                  'status_display', 'date_creation', 'date_expiration', 'sous_total',
+                  'remise', 'tva', 'total')
+
+
+class DevisDetailSerializer(serializers.ModelSerializer):
+    agence = AgenceSimpleSerializer(read_only=True)
+    client = ClientSerializer(read_only=True)
+    vendeur = UserSerializer(read_only=True)
+    items = DevisItemSerializer(many=True, read_only=True)
+    est_valide = serializers.BooleanField(read_only=True)
+    jours_restants = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Devis
+        fields = '__all__'
+
+
+class DevisCreateSerializer(serializers.ModelSerializer):
+    items = DevisItemSerializer(many=True, write_only=True)
+    client_id = serializers.IntegerField(required=False, allow_null=True)
+
+    class Meta:
+        model = Devis
+        fields = ('agence', 'client_id', 'date_expiration', 'notes', 'conditions',
+                  'pied_de_page', 'items')
+        read_only_fields = ('id', 'reference', 'status', 'vendeur', 'date_creation',
+                            'sous_total', 'remise', 'remise_percentage', 'tva', 'total')
+
+    def validate(self, data):
+        items_data = data.get('items', [])
+        if not items_data:
+            raise serializers.ValidationError(
+                {"items": "Au moins un article est requis"})
+        if data.get('date_expiration') and data['date_expiration'] < timezone.now().date():
+            raise serializers.ValidationError(
+                {"date_expiration": "La date d'expiration ne peut pas être dans le passé"})
+        return data
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        client_id = validated_data.pop('client_id', None)
+        user = self.context['request'].user
+
+        sous_total = Decimal('0')
+        for item in items_data:
+            prix = Decimal(str(item.get('prix_unitaire', 0)))
+            qte = Decimal(str(item.get('quantity', 0)))
+            sous_total += prix * qte
+
+        tva = sous_total * Decimal('0.18')
+        total = sous_total + tva
+
+        devis = Devis.objects.create(
+            **validated_data,
+            client_id=client_id,
+            vendeur=user,
+            sous_total=sous_total,
+            tva=tva,
+            total=total
+        )
+
+        for item_data in items_data:
+            DevisItem.objects.create(devis=devis, **item_data)
+
+        return devis
+
+
 class PaiementSerializer(serializers.ModelSerializer):
     encaisse_par_nom = serializers.CharField(
         source='encaisse_par.email', read_only=True)

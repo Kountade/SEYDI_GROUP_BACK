@@ -155,6 +155,109 @@ class VenteItem(models.Model):
         super().save(*args, **kwargs)
 
 
+class Devis(models.Model):
+    """Devis (proforma / estimation) avant transformation en vente"""
+    STATUS_CHOICES = (
+        ('draft', 'Brouillon'),
+        ('sent', 'Envoyé'),
+        ('accepted', 'Accepté'),
+        ('refused', 'Refusé'),
+        ('converted', 'Converti en vente'),
+        ('expired', 'Expiré'),
+        ('cancelled', 'Annulé'),
+    )
+
+    reference = models.CharField(max_length=100, unique=True)
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='devis')
+    client = models.ForeignKey(
+        Client, on_delete=models.SET_NULL, null=True, blank=True, related_name='devis')
+    vendeur = models.ForeignKey(
+        CustomUser, on_delete=models.PROTECT, related_name='devis')
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='draft')
+    date_creation = models.DateTimeField(default=timezone.now)
+    date_expiration = models.DateField()  # Date de validité du devis
+
+    sous_total = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    remise_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0)
+    tva = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    notes = models.TextField(blank=True, null=True)
+    conditions = models.TextField(
+        blank=True, null=True, help_text="Conditions générales du devis")
+    pied_de_page = models.TextField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date_creation']
+        indexes = [
+            models.Index(fields=['reference']),
+            models.Index(fields=['status']),
+            models.Index(fields=['agence', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.reference} - {self.client} - {self.total} FCFA"
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            from datetime import datetime
+            prefix = f"DEV{datetime.now().strftime('%Y%m%d')}"
+            last = Devis.objects.filter(
+                reference__startswith=prefix).order_by('-id').first()
+            if last:
+                last_num = int(last.reference.replace(prefix, ''))
+                self.reference = f"{prefix}{str(last_num + 1).zfill(4)}"
+            else:
+                self.reference = f"{prefix}0001"
+        super().save(*args, **kwargs)
+
+    @property
+    def est_valide(self):
+        return self.status in ('draft', 'sent', 'accepted') and self.date_expiration >= timezone.now().date()
+
+    @property
+    def jours_restants(self):
+        if self.est_valide:
+            return (self.date_expiration - timezone.now().date()).days
+        return 0
+
+
+class DevisItem(models.Model):
+    """Ligne d'un devis"""
+    devis = models.ForeignKey(
+        Devis, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    variant = models.ForeignKey(
+        ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
+
+    quantity = models.IntegerField(validators=[MinValueValidator(1)])
+    prix_unitaire = models.DecimalField(
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    remise = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    tva = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.product.name} x {self.quantity}"
+
+    def save(self, *args, **kwargs):
+        self.total = (self.prix_unitaire * self.quantity) - \
+            self.remise + self.tva
+        super().save(*args, **kwargs)
+
+
 class Facture(models.Model):
     """Facture générée à partir d'une vente"""
     STATUS_CHOICES = (
