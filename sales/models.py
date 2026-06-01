@@ -185,7 +185,6 @@ class Devis(models.Model):
     remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     remise_percentage = models.DecimalField(
         max_digits=5, decimal_places=2, default=0)
-    tva = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     notes = models.TextField(blank=True, null=True)
@@ -218,6 +217,8 @@ class Devis(models.Model):
                 self.reference = f"{prefix}{str(last_num + 1).zfill(4)}"
             else:
                 self.reference = f"{prefix}0001"
+        # Calcul du total = sous_total - remise (sans TVA)
+        self.total = self.sous_total - self.remise
         super().save(*args, **kwargs)
 
     @property
@@ -243,7 +244,6 @@ class DevisItem(models.Model):
     prix_unitaire = models.DecimalField(
         max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     remise = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    tva = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     class Meta:
@@ -253,8 +253,8 @@ class DevisItem(models.Model):
         return f"{self.product.name} x {self.quantity}"
 
     def save(self, *args, **kwargs):
-        self.total = (self.prix_unitaire * self.quantity) - \
-            self.remise + self.tva
+        # Calcul du total sans TVA
+        self.total = (self.prix_unitaire * self.quantity) - self.remise
         super().save(*args, **kwargs)
 
 

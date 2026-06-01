@@ -405,7 +405,6 @@ class DevisViewSet(viewsets.ModelViewSet):
                             status=status.HTTP_400_BAD_REQUEST)
         devis.status = 'sent'
         devis.save()
-        # Ici vous pouvez ajouter l'envoi d'email (si nécessaire)
         return Response({'success': True, 'message': 'Devis envoyé avec succès', 'status': devis.status})
 
     @action(detail=True, methods=['post'])
@@ -447,23 +446,22 @@ class DevisViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Ce devis n\'a pas de client associé, impossible de créer une vente.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # Créer la vente à partir du devis
+        # Créer la vente à partir du devis (sans TVA)
         vente = Vente.objects.create(
             agence=devis.agence,
             client=devis.client,
             vendeur=devis.vendeur,
-            type_vente='livraison',  # ou autre selon votre logique
+            type_vente='livraison',
             status='draft',
             sous_total=devis.sous_total,
             remise=devis.remise,
             remise_percentage=devis.remise_percentage,
-            tva=devis.tva,
             total=devis.total,
             montant_du=devis.total,
             notes=f"Vente issue du devis {devis.reference}\n{devis.notes or ''}"
         )
 
-        # Copier les lignes du devis vers la vente
+        # Copier les lignes du devis vers la vente (sans tva)
         for item in devis.items.all():
             VenteItem.objects.create(
                 vente=vente,
@@ -472,15 +470,12 @@ class DevisViewSet(viewsets.ModelViewSet):
                 quantity=item.quantity,
                 prix_unitaire=item.prix_unitaire,
                 remise=item.remise,
-                tva=item.tva,
                 total=item.total
             )
 
-        # Marquer le devis comme converti
         devis.status = 'converted'
         devis.save()
 
-        # Retourner les détails de la nouvelle vente
         serializer = VenteDetailSerializer(vente, context={'request': request})
         return Response({
             'success': True,
@@ -490,7 +485,7 @@ class DevisViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def pdf(self, request, pk=None):
-        """Génère un PDF du devis (similaire à la facture)"""
+        """Génère un PDF du devis (sans TVA)"""
         devis = self.get_object()
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm,
@@ -548,7 +543,7 @@ class DevisViewSet(viewsets.ModelViewSet):
         elements.append(Paragraph("ARTICLES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
                                                              fontSize=14, textColor=colors.HexColor('#1e40af'))))
         table_data = [['Désignation', 'Référence',
-                       'Qté', 'Prix HT', 'Total TTC']]
+                       'Qté', 'Prix unitaire', 'Total']]
         for item in devis.items.all():
             table_data.append([item.product.name[:50], item.product.reference[:20], str(item.quantity),
                                f"{item.prix_unitaire:,.0f} FCFA", f"{item.total:,.0f} FCFA"])
@@ -565,10 +560,10 @@ class DevisViewSet(viewsets.ModelViewSet):
         elements.append(table)
         elements.append(Spacer(1, 0.5*cm))
 
-        # Totaux
+        # Totaux (sans TVA)
         totals_data = [
-            ['Sous-total HT :', f"{devis.sous_total:,.0f} FCFA"],
-            ['TVA (18%) :', f"{devis.tva:,.0f} FCFA"],
+            ['Sous-total :', f"{devis.sous_total:,.0f} FCFA"],
+            ['Remise :', f"{devis.remise:,.0f} FCFA"],
             ['TOTAL TTC :', f"{devis.total:,.0f} FCFA"],
         ]
         totals_table = Table(totals_data, colWidths=[8*cm, 6*cm])

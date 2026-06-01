@@ -102,8 +102,7 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             VenteItem.objects.create(vente=vente, **item_data)
 
         return vente
-
-
+    
 class DevisItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
@@ -112,7 +111,7 @@ class DevisItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = DevisItem
         fields = ('id', 'product', 'product_name', 'product_reference', 'variant',
-                  'quantity', 'prix_unitaire', 'remise', 'tva', 'total')
+                  'quantity', 'prix_unitaire', 'remise', 'total')
         read_only_fields = ('id', 'total')
 
 
@@ -128,7 +127,7 @@ class DevisListSerializer(serializers.ModelSerializer):
         model = Devis
         fields = ('id', 'reference', 'client_nom', 'agence_nom', 'vendeur_nom', 'status',
                   'status_display', 'date_creation', 'date_expiration', 'sous_total',
-                  'remise', 'tva', 'total')
+                  'remise', 'total')  # tva supprimé
 
 
 class DevisDetailSerializer(serializers.ModelSerializer):
@@ -141,7 +140,7 @@ class DevisDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Devis
-        fields = '__all__'
+        fields = '__all__'  # Le modèle n'a plus de champ tva, donc correct
 
 
 class DevisCreateSerializer(serializers.ModelSerializer):
@@ -153,7 +152,7 @@ class DevisCreateSerializer(serializers.ModelSerializer):
         fields = ('agence', 'client_id', 'date_expiration', 'notes', 'conditions',
                   'pied_de_page', 'items')
         read_only_fields = ('id', 'reference', 'status', 'vendeur', 'date_creation',
-                            'sous_total', 'remise', 'remise_percentage', 'tva', 'total')
+                            'sous_total', 'remise', 'remise_percentage', 'total')
 
     def validate(self, data):
         items_data = data.get('items', [])
@@ -176,15 +175,14 @@ class DevisCreateSerializer(serializers.ModelSerializer):
             qte = Decimal(str(item.get('quantity', 0)))
             sous_total += prix * qte
 
-        tva = sous_total * Decimal('0.18')
-        total = sous_total + tva
+        # Pas de TVA, le total = sous_total (la remise sera déduite par le modèle)
+        total = sous_total
 
         devis = Devis.objects.create(
             **validated_data,
             client_id=client_id,
             vendeur=user,
             sous_total=sous_total,
-            tva=tva,
             total=total
         )
 
@@ -192,7 +190,6 @@ class DevisCreateSerializer(serializers.ModelSerializer):
             DevisItem.objects.create(devis=devis, **item_data)
 
         return devis
-
 
 class PaiementSerializer(serializers.ModelSerializer):
     encaisse_par_nom = serializers.CharField(
