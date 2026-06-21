@@ -1,15 +1,15 @@
-# dashboard/views.py
 from rest_framework import viewsets, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Sum, Count, Q, F, Avg
+from django.db.models import Sum, Count, Q, F
 from django.utils import timezone
 from datetime import timedelta
 from decimal import Decimal
+from django.db import connection
 
 from users.models import Agence, CustomUser
-from produits.models import Product, ProductPricing
+from produits.models import Product
 from purchases.models import Supplier, PurchaseOrder
 from inventaire.models import WarehouseStock, StockAlert, Transfer
 from sales.models import Vente, VenteItem
@@ -23,10 +23,17 @@ from .serializers import (
     AlertesStockSerializer
 )
 
+# Essayer d'importer ProductPricing si disponible
+try:
+    from produits.models import ProductPricing
+    HAS_PRICING = True
+except ImportError:
+    HAS_PRICING = False
+
 
 class DashboardViewSet(viewsets.ViewSet):
     """
-    Endpoints généraux pour le tableau de bord principal.
+    Vue d'ensemble du tableau de bord (KPI généraux, alertes).
     """
     permission_classes = [IsAuthenticated, IsChefAgenceOrAbove]
 
@@ -37,9 +44,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def overview(self, request):
-        """
-        Vue d'ensemble des KPI.
-        """
+        """Vue d'ensemble des KPI."""
         user = request.user
         agences = self.get_agences(user)
 
@@ -51,7 +56,6 @@ class DashboardViewSet(viewsets.ViewSet):
         ).distinct().count()
         total_produits = Product.objects.filter(is_active=True).count()
         total_fournisseurs = Supplier.objects.filter(is_active=True).count()
-        # à affiner si besoin de filtre agence
         total_employes = Employee.objects.count()
 
         # Ventes
@@ -73,30 +77,47 @@ class DashboardViewSet(viewsets.ViewSet):
         total_achats = achats.filter(status='received').aggregate(
             total=Sum('total'))['total'] or Decimal('0.00')
         commandes_encours = achats.filter(status__in=[
-                                          'draft', 'sent', 'confirmed', 'in_transit', 'partially_received']).count()
+            'draft', 'sent', 'confirmed', 'in_transit', 'partially_received']).count()
         commandes_retard = achats.filter(expected_date__lt=aujourd_hui, status__in=[
-                                         'confirmed', 'sent', 'in_transit']).count()
+            'confirmed', 'sent', 'in_transit']).count()
 
-        # Inventaire - valeur du stock (basée sur le dernier prix d'achat via ProductPricing)
-        # On récupère le prix d'achat du produit (le plus récent) via ProductPricing
-        # Pour simplifier, on utilise le prix d'achat du produit s'il existe, sinon 0
+        # Inventaire - calcul de la valeur du stock
         warehouse_stocks = WarehouseStock.objects.filter(
             warehouse__agence__in=agences
-        ).select_related('product')
+        )
         valeur_stock = Decimal('0.00')
-        for ws in warehouse_stocks:
-            # Récupérer le dernier prix d'achat (is_current=True) pour ce produit
-            pricing = ProductPricing.objects.filter(
-                product=ws.product,
-                is_current=True
-            ).order_by('-valid_from').first()
-            prix_achat = pricing.purchase_price if pricing else Decimal('0.00')
-            valeur_stock += (ws.quantity * prix_achat)
-        # Alternative avec agrégation si Product a un champ purchase_price direct
-        # valeur_stock = warehouse_stocks.aggregate(total=Sum(F('quantity') * F('product__purchase_price')))['total'] or Decimal('0.00')
+
+        if HAS_PRICING:
+            # Utiliser ProductPricing pour obtenir les prix d'achat
+            for ws in warehouse_stocks:
+                try:
+                    pricing = ProductPricing.objects.filter(
+                        product=ws.product,
+                        warehouse=ws.warehouse,
+                        is_current=True
+                    ).first()
+                    if pricing:
+                        valeur_stock += (ws.quantity or 0) * \
+                            (pricing.purchase_price or 0)
+                except:
+                    pass
+        else:
+            # Sinon, on peut utiliser un prix par défaut (par exemple 0)
+            # Ou on peut essayer d'utiliser un champ 'price' si présent dans Product
+            # On vérifie si Product a un champ 'price' (par défaut non)
+            if hasattr(Product, 'price'):
+                for ws in warehouse_stocks:
+                    valeur_stock += (ws.quantity or 0) * \
+                        (ws.product.price or 0)
+            else:
+                # En dernier recours, on prend le premier prix de vente disponible
+                # Mais pour l'instant on met 0
+                valeur_stock = Decimal('0.00')
 
         alertes_stock = StockAlert.objects.filter(
-            warehouse__agence__in=agences, status='active').count()
+            warehouse__agence__in=agences, status='active'
+        ).count()
+
         transferts_encours = Transfer.objects.filter(
             Q(from_agence__in=agences) | Q(to_agence__in=agences),
             status__in=['pending_approval', 'approved', 'in_transit']
@@ -147,15 +168,13 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def alertes_stock(self, request):
-        """
-        Liste des alertes de stock actives.
-        """
+        """Liste des alertes de stock actives."""
         user = request.user
         agences = self.get_agences(user)
         alertes = StockAlert.objects.filter(
             warehouse__agence__in=agences,
             status='active'
-        ).select_related('product', 'warehouse__agence')
+        ).select_related('product', 'warehouse')
 
         data = [
             {
@@ -173,11 +192,9 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def stats_rh(self, request):
-        """
-        Statistiques RH (réservé PDG/DRH).
-        """
+        """Statistiques RH (réservé PDG/DRH)."""
         if not (request.user.est_pdg() or request.user.est_drh()):
-            return Response({"detail": "Accès réservé au PDG ou DRH."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Accès réservé."}, status=status.HTTP_403_FORBIDDEN)
 
         total = Employee.objects.count()
         actifs = Employee.objects.filter(work_status='active').count()
@@ -201,7 +218,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
 class StatistiquesViewSet(viewsets.ViewSet):
     """
-    Endpoints pour les statistiques avancées.
+    Statistiques détaillées : ventes mensuelles, top produits, etc.
     """
     permission_classes = [IsAuthenticated, IsChefAgenceOrAbove]
 
@@ -212,38 +229,39 @@ class StatistiquesViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def ventes_mensuelles(self, request):
-        """
-        Ventes par mois sur les 12 derniers mois.
-        """
+        """Ventes par mois sur 12 mois."""
         user = request.user
         agences = self.get_agences(user)
         today = timezone.now().date()
         start_date = today - timedelta(days=365)
 
-        # Utilisation de TruncMonth pour éviter l'extra
-        from django.db.models.functions import TruncMonth
+        # Version compatible SQLite
+        # On récupère les ventes et on les groupe par mois en Python (car SQLite n'a pas DATE_TRUNC)
         ventes = Vente.objects.filter(
             agence__in=agences,
             status='completed',
             date_vente__date__gte=start_date
-        ).annotate(
-            mois=TruncMonth('date_vente')
-        ).values('mois').annotate(total=Sum('total')).order_by('mois')
+        ).values('date_vente__year', 'date_vente__month').annotate(
+            total=Sum('total')
+        ).order_by('date_vente__year', 'date_vente__month')
 
         result = []
         for v in ventes:
-            if v['mois']:
-                result.append({
-                    'mois': v['mois'].strftime('%Y-%m'),
-                    'total': v['total']
-                })
-        return Response(result)
+            year = v['date_vente__year']
+            month = v['date_vente__month']
+            mois = f"{year}-{month:02d}"
+            result.append({
+                'mois': mois,
+                'total': v['total']
+            })
+
+        # Si aucune donnée, on renvoie un tableau vide
+        serializer = VentesParMoisSerializer(result, many=True)
+        return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def top_produits(self, request):
-        """
-        Top 10 produits vendus en quantité.
-        """
+        """Top 10 produits en quantité vendue."""
         user = request.user
         agences = self.get_agences(user)
 
@@ -255,21 +273,18 @@ class StatistiquesViewSet(viewsets.ViewSet):
             total=Sum('total')
         ).order_by('-quantite')[:10]
 
-        # Transformer les noms de champs pour correspondre au sérializer
-        result = []
-        for item in top:
-            result.append({
-                'produit': item['product__name'] or 'Sans nom',
-                'quantite': item['quantite'] or 0,
-                'total': item['total'] or 0
-            })
+        # Adapter aux champs attendus par le frontend
+        result = [
+            {'produit': item['product__name'] or 'Produit inconnu',
+             'quantite': item['quantite'],
+             'total': item['total']}
+            for item in top
+        ]
         return Response(result)
 
     @action(detail=False, methods=['get'])
     def ventes_par_categorie(self, request):
-        """
-        Répartition du CA par catégorie de produit.
-        """
+        """CA par catégorie."""
         user = request.user
         agences = self.get_agences(user)
 
@@ -279,105 +294,61 @@ class StatistiquesViewSet(viewsets.ViewSet):
         ).values('product__category__name').annotate(
             total=Sum('total')
         ).order_by('-total')
-
         return Response(data)
 
 
 class AnalysesViewSet(viewsets.ViewSet):
     """
-    Endpoints pour les analyses avancées (tendances, prévisions...).
+    Analyses avancées : tendances, prévisions, marges.
     """
     permission_classes = [IsAuthenticated, IsPDGOrDRH]  # Accès restreint
 
     @action(detail=False, methods=['get'])
     def tendance_ventes(self, request):
-        """
-        Tendance des ventes sur les 6 derniers mois (évolution).
-        """
+        """Évolution des ventes sur 6 mois (compatible SQLite)."""
         today = timezone.now().date()
         start_date = today - timedelta(days=180)
-        from django.db.models.functions import TruncMonth
         ventes = Vente.objects.filter(
             status='completed',
             date_vente__date__gte=start_date
-        ).annotate(
-            mois=TruncMonth('date_vente')
-        ).values('mois').annotate(total=Sum('total')).order_by('mois')
+        ).values('date_vente__year', 'date_vente__month').annotate(
+            total=Sum('total')
+        ).order_by('date_vente__year', 'date_vente__month')
 
         result = []
         for v in ventes:
-            if v['mois']:
-                result.append({
-                    'mois': v['mois'].strftime('%Y-%m'),
-                    'total': float(v['total']) if v['total'] else 0
-                })
+            year = v['date_vente__year']
+            month = v['date_vente__month']
+            mois = f"{year}-{month:02d}"
+            result.append({
+                'mois': mois,
+                'total': float(v['total'])
+            })
         return Response(result)
 
     @action(detail=False, methods=['get'])
     def marge_moyenne(self, request):
-        """
-        Marge moyenne par produit (prix vente - prix achat).
-        """
-        from django.db.models import Avg, F, Value
-        from django.db.models.functions import Coalesce
+        """Marge moyenne par produit."""
+        # On vérifie si le champ purchase_price existe dans Product
+        if not hasattr(Product, 'purchase_price'):
+            return Response({"error": "Le champ purchase_price n'existe pas dans le modèle Product."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Récupérer le prix d'achat depuis ProductPricing pour chaque produit
-        # On va annoter chaque VenteItem avec le prix d'achat du produit (le plus récent)
-        # Cette requête peut être lourde, on fait une approche plus simple :
-        # On agrège par produit et on calcule la marge moyenne
+        from django.db.models import Avg, F
         ventes_items = VenteItem.objects.filter(
             vente__status='completed'
         ).values('product__name').annotate(
-            prix_vente_moyen=Avg('prix_unitaire'),
-            # On récupère le prix d'achat moyen du produit depuis ProductPricing
-            # Pour simplifier, on utilise le champ purchase_price de ProductPricing si disponible
-            # Sinon on peut faire une sous-requête.
-        )
-        # Ici, on va plutôt utiliser une approche avec ProductPricing
-        # On peut faire une boucle mais pour l'exemple on retourne des données factices
-        # ou on peut faire une requête plus complexe.
-        # Je propose de retourner une liste des produits avec leur marge moyenne calculée en backend
-        # Pour l'exemple, on renvoie les produits avec un prix de vente moyen et un prix d'achat moyen estimé
-        # (à adapter selon votre modèle)
-
-        # Simplification : on retourne les produits avec leur prix de vente moyen
-        # et on ajoute un champ marge estimée (à améliorer)
-        result = []
-        for item in ventes_items:
-            # On essaie de récupérer le prix d'achat depuis ProductPricing
-            product = Product.objects.filter(
-                name=item['product__name']).first()
-            if product:
-                pricing = ProductPricing.objects.filter(
-                    product=product, is_current=True).order_by('-valid_from').first()
-                purchase_price = pricing.purchase_price if pricing else 0
-                marge = float(item['prix_vente_moyen']) - float(purchase_price)
-                result.append({
-                    'produit': item['product__name'],
-                    'prix_vente_moyen': item['prix_vente_moyen'],
-                    'prix_achat_moyen': purchase_price,
-                    'marge_moyenne': marge
-                })
-            else:
-                result.append({
-                    'produit': item['product__name'],
-                    'prix_vente_moyen': item['prix_vente_moyen'],
-                    'prix_achat_moyen': 0,
-                    'marge_moyenne': 0
-                })
-        # Trier par marge décroissante
-        result.sort(key=lambda x: x['marge_moyenne'], reverse=True)
-        return Response(result[:20])
+            marge_moyenne=Avg(F('prix_unitaire') -
+                              F('product__purchase_price'))
+        ).order_by('-marge_moyenne')[:20]
+        return Response(ventes_items)
 
     @action(detail=False, methods=['get'])
     def prevision_stock(self, request):
-        """
-        Prévision de rupture de stock basée sur les ventes passées.
-        """
+        """Prévision de rupture de stock."""
+        from django.db.models import Sum
         today = timezone.now().date()
         start_date = today - timedelta(days=30)
 
-        # Consommation sur 30 jours
         consommation = VenteItem.objects.filter(
             vente__status='completed',
             vente__date_vente__date__gte=start_date
@@ -385,16 +356,14 @@ class AnalysesViewSet(viewsets.ViewSet):
             total_vendu=Sum('quantity')
         )
 
-        # Produits en stock
-        stocks = WarehouseStock.objects.filter(
-            quantity__gt=0).select_related('product')
+        stocks = WarehouseStock.objects.filter(quantity__gt=0)
         previsions = []
         for stock in stocks:
             conso = next(
                 (c['total_vendu'] for c in consommation if c['product_id'] == stock.product.id), 0)
             if conso > 0:
                 jours_restants = stock.quantity / conso * 30
-                if jours_restants < 15:  # alerte si moins de 15 jours
+                if jours_restants < 15:
                     previsions.append({
                         'produit': stock.product.name,
                         'stock': stock.quantity,
