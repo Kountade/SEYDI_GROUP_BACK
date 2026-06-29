@@ -13,8 +13,7 @@ urlpatterns = [
     path('', include('purchases.urls')),
     path('', include('sales.urls')),
     path('', include('dashboard.urls')),
-
-    # path('', include('audit.urls')),
+    path('', include('audit.urls')),
 
 
 
