@@ -54,7 +54,7 @@ INSTALLED_APPS = [
     "inventaire",
     "purchases",
     "sales",
-    "audit",
+    # "audit",
     "dashboard",
 
 ]

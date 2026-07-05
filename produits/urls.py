@@ -12,11 +12,13 @@ router.register('brands', BrandViewset, basename='brands')
 router.register('units', UnitViewset, basename='units')
 router.register('products', ProductViewset, basename='products')
 router.register('variants', ProductVariantViewset, basename='variants')
-router.register('product-prices', ProductPricingViewSet, basename='product-prices')  # NOUVEAU
+router.register('product-prices', ProductPricingViewSet,
+                basename='product-prices')  # NOUVEAU
 
 urlpatterns = [
     path('', include(router.urls)),
 ]
 
 if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    urlpatterns += static(settings.MEDIA_URL,
+                          document_root=settings.MEDIA_ROOT)

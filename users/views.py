@@ -45,7 +45,6 @@ class RegisterViewset(viewsets.ViewSet):
             return Response({"user": UserSerializer(user).data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=400)
 
-# users/views.py - UserViewset complet
 
 class UserViewset(viewsets.ViewSet):
     """
@@ -80,6 +79,13 @@ class UserViewset(viewsets.ViewSet):
         if agence_id:
             queryset = queryset.filter(
                 roles_agence__agence_id=agence_id, roles_agence__est_actif=True)
+        
+        # ✅ NOUVEAU FILTRE : Filtrer par type de rôle (chef_agence, commercial, gestionnaire_stock, comptable)
+        role_type = request.query_params.get('role_type')
+        if role_type:
+            queryset = queryset.filter(
+                roles_agence__role=role_type, roles_agence__est_actif=True)
+        
         serializer = UserSerializer(queryset, many=True)
         return Response(serializer.data)
 
@@ -134,7 +140,7 @@ class UserViewset(viewsets.ViewSet):
 
     def partial_update(self, request, pk=None):
         """
-        Mise à jour partielle d'un utilisateur (pour activation/désactivation)
+        Mise à jour partielle d'un utilisateur
         """
         # Vérification des droits
         if not (request.user.est_pdg() or request.user.est_drh()):
@@ -245,6 +251,71 @@ class UserViewset(viewsets.ViewSet):
         except RoleAgence.DoesNotExist:
             return Response({"error": "Rôle non trouvé"}, status=404)
 
+    @action(detail=True, methods=['post'])
+    def assign_multiple_roles(self, request, pk=None):
+        """
+        ✅ NOUVEAU : Assigner plusieurs rôles à un utilisateur
+        """
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            return Response({"error": "Permission denied"}, status=403)
+        
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Utilisateur non trouvé"}, status=404)
+        
+        roles_data = request.data.get('roles', [])
+        if not roles_data:
+            return Response({"error": "Liste des rôles requise"}, status=400)
+        
+        created_roles = []
+        errors = []
+        
+        for role_item in roles_data:
+            agence_id = role_item.get('agence_id')
+            role = role_item.get('role')
+            
+            if not agence_id or not role:
+                errors.append({"error": "agence_id et role sont requis"})
+                continue
+            
+            try:
+                agence = Agence.objects.get(id=agence_id, est_active=True)
+            except Agence.DoesNotExist:
+                errors.append({"error": f"Agence {agence_id} non trouvée"})
+                continue
+            
+            # ✅ Vérifier que le rôle est disponible (inclut gestionnaire_stock et comptable)
+            roles_disponibles = [r[0] for r in agence.get_roles_disponibles()]
+            if role not in roles_disponibles:
+                errors.append({
+                    "error": f"Rôle '{role}' non disponible pour l'agence {agence.nom}"
+                })
+                continue
+            
+            # Vérifier les doublons
+            if RoleAgence.objects.filter(user=user, agence=agence, role=role, est_actif=True).exists():
+                errors.append({
+                    "error": f"L'utilisateur a déjà le rôle {role} dans l'agence {agence.nom}"
+                })
+                continue
+            
+            # Créer le rôle
+            role_obj = RoleAgence.objects.create(
+                user=user,
+                agence=agence,
+                role=role,
+                est_actif=True
+            )
+            created_roles.append(RoleAgenceSerializer(role_obj).data)
+        
+        return Response({
+            "created": created_roles,
+            "errors": errors,
+            "total_created": len(created_roles),
+            "total_errors": len(errors)
+        }, status=201 if created_roles else 400)
+
     @action(detail=False, methods=['get'])
     def me(self, request):
         """
@@ -269,16 +340,58 @@ class UserViewset(viewsets.ViewSet):
             "pdg": users.filter(role_global='pdg').count(),
             "drh": users.filter(role_global='drh').count(),
             "autre": users.filter(role_global='autre').count(),
-            "by_agence": {}
+            "by_agence": {},
+            "by_role": {  # ✅ NOUVEAU : Statistiques par rôle
+                "chef_agence": RoleAgence.objects.filter(role='chef_agence', est_actif=True).count(),
+                "commercial": RoleAgence.objects.filter(role='commercial', est_actif=True).count(),
+                "gestionnaire_stock": RoleAgence.objects.filter(role='gestionnaire_stock', est_actif=True).count(),
+                "comptable": RoleAgence.objects.filter(role='comptable', est_actif=True).count(),
+            }
         }
         
-        # Statistiques par agence
+        # Statistiques par agence avec détails des rôles
         for agence in Agence.objects.filter(est_active=True):
             count = users.filter(roles_agence__agence_id=agence.id, roles_agence__est_actif=True).count()
             if count > 0:
-                stats["by_agence"][agence.nom] = count
+                stats["by_agence"][agence.nom] = {
+                    "total": count,
+                    "chefs": agence.roles.filter(role='chef_agence', est_actif=True).count(),
+                    "commerciaux": agence.roles.filter(role='commercial', est_actif=True).count(),
+                    "gestionnaires": agence.roles.filter(role='gestionnaire_stock', est_actif=True).count(),
+                    "comptables": agence.roles.filter(role='comptable', est_actif=True).count(),
+                }
         
         return Response(stats)
+
+    @action(detail=False, methods=['get'])
+    def by_role(self, request):
+        """
+        ✅ NOUVEAU : Récupérer les utilisateurs par type de rôle
+        """
+        role_type = request.query_params.get('role')
+        if not role_type:
+            return Response({"error": "Paramètre 'role' requis"}, status=400)
+        
+        # Vérifier que le rôle existe
+        roles_disponibles = [r[0] for r in RoleAgence.ROLE_CHOICES]
+        if role_type not in roles_disponibles:
+            return Response({"error": f"Rôle '{role_type}' invalide"}, status=400)
+        
+        # Filtrer les utilisateurs par rôle
+        users = User.objects.filter(
+            roles_agence__role=role_type, 
+            roles_agence__est_actif=True,
+            is_active=True
+        ).distinct()
+        
+        # Si l'utilisateur n'est pas PDG/DRH, filtrer par ses agences
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            agences_ids = request.user.roles_agence.filter(
+                est_actif=True).values_list('agence_id', flat=True)
+            users = users.filter(roles_agence__agence_id__in=agences_ids)
+        
+        serializer = UserSerializer(users, many=True)
+        return Response(serializer.data)
 
 
 class ProfileViewset(viewsets.ViewSet):
@@ -302,6 +415,26 @@ class ProfileViewset(viewsets.ViewSet):
         agences = request.user.get_agences()
         serializer = AgenceSerializer(agences, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def roles(self, request):
+        """
+        ✅ NOUVEAU : Récupérer tous les rôles de l'utilisateur connecté
+        """
+        roles = request.user.roles_agence.filter(est_actif=True).select_related('agence')
+        return Response([
+            {
+                'id': role.id,
+                'agence_id': role.agence.id,
+                'agence_nom': role.agence.nom,
+                'agence_type': role.agence.type_agence,
+                'role': role.role,
+                'role_display': role.get_role_display(),
+                'est_actif': role.est_actif,
+                'date_attribution': role.date_attribution
+            }
+            for role in roles
+        ])
 
 
 class AgenceViewset(viewsets.ModelViewSet):
@@ -379,9 +512,20 @@ class AgenceViewset(viewsets.ModelViewSet):
         agence = self.get_object()
         if not (request.user.est_pdg() or request.user.est_drh() or request.user.peut_acceder_agence(agence.id)):
             return Response({"error": "Permission denied"}, status=403)
+        
+        # ✅ Ajout du filtre par rôle
+        role_filter = request.query_params.get('role')
         roles = agence.roles.filter(est_actif=True).select_related('user')
-        utilisateurs = [{'user': UserSerializer(
-            r.user).data, 'role': r.role, 'role_display': r.get_role_display()} for r in roles]
+        if role_filter:
+            roles = roles.filter(role=role_filter)
+        
+        utilisateurs = [{
+            'user': UserSerializer(r.user).data, 
+            'role': r.role, 
+            'role_display': r.get_role_display(),
+            'date_attribution': r.date_attribution,
+            'est_actif': r.est_actif
+        } for r in roles]
         return Response(utilisateurs)
 
     @action(detail=True, methods=['get'])
@@ -397,6 +541,31 @@ class AgenceViewset(viewsets.ModelViewSet):
             'type_display': agence.get_type_agence_display(), 
             'roles': roles
         })
+
+    @action(detail=True, methods=['get'])
+    def stats(self, request, pk=None):
+        """
+        ✅ NOUVEAU : Statistiques détaillées d'une agence
+        """
+        agence = self.get_object()
+        if not (request.user.est_pdg() or request.user.est_drh() or request.user.peut_acceder_agence(agence.id)):
+            return Response({"error": "Permission denied"}, status=403)
+        
+        roles = agence.roles.filter(est_actif=True)
+        stats = {
+            'agence_id': agence.id,
+            'agence_nom': agence.nom,
+            'type_agence': agence.type_agence,
+            'total_utilisateurs': roles.count(),
+            'par_role': {
+                'chef_agence': roles.filter(role='chef_agence').count(),
+                'commercial': roles.filter(role='commercial').count(),
+                'gestionnaire_stock': roles.filter(role='gestionnaire_stock').count(),
+                'comptable': roles.filter(role='comptable').count(),
+            },
+            'roles_disponibles': [{'value': r[0], 'label': r[1]} for r in agence.get_roles_disponibles()]
+        }
+        return Response(stats)
 
 
 class RoleAgenceViewset(viewsets.ModelViewSet):
@@ -420,6 +589,51 @@ class RoleAgenceViewset(viewsets.ModelViewSet):
             serializer.save()
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
+
+    @action(detail=False, methods=['get'])
+    def by_user(self, request):
+        """
+        ✅ NOUVEAU : Récupérer tous les rôles d'un utilisateur spécifique
+        """
+        user_id = request.query_params.get('user_id')
+        if not user_id:
+            return Response({"error": "Paramètre 'user_id' requis"}, status=400)
+        
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({"error": "Utilisateur non trouvé"}, status=404)
+        
+        # Vérification des droits
+        if not (request.user.est_pdg() or request.user.est_drh()):
+            if request.user.id != int(user_id):
+                return Response({"error": "Permission denied"}, status=403)
+        
+        roles = user.roles_agence.filter(est_actif=True).select_related('agence')
+        serializer = RoleAgenceSerializer(roles, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def by_agence(self, request):
+        """
+        ✅ NOUVEAU : Récupérer tous les rôles d'une agence spécifique
+        """
+        agence_id = request.query_params.get('agence_id')
+        if not agence_id:
+            return Response({"error": "Paramètre 'agence_id' requis"}, status=400)
+        
+        try:
+            agence = Agence.objects.get(id=agence_id)
+        except Agence.DoesNotExist:
+            return Response({"error": "Agence non trouvée"}, status=404)
+        
+        # Vérification des droits
+        if not (request.user.est_pdg() or request.user.est_drh() or request.user.peut_acceder_agence(agence_id)):
+            return Response({"error": "Permission denied"}, status=403)
+        
+        roles = agence.roles.filter(est_actif=True).select_related('user')
+        serializer = RoleAgenceSerializer(roles, many=True)
+        return Response(serializer.data)
 
 
 class AgencesPubliquesViewset(viewsets.ViewSet):

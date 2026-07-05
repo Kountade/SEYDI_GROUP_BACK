@@ -13,7 +13,7 @@ from io import BytesIO
 from django.http import HttpResponse
 from rest_framework.decorators import action
 from rest_framework import status
-
+import logging
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -25,6 +25,8 @@ from .models import *
 from .serializers import *
 from users.permissions import HasAgenceAccess, IsPDG, IsChefAgence
 from inventaire.models import WarehouseStock, StockMovement, Warehouse
+
+logger = logging.getLogger(__name__)
 
 
 class ClientViewSet(viewsets.ModelViewSet):
@@ -66,7 +68,20 @@ class ClientViewSet(viewsets.ModelViewSet):
             )
 
 
+# sales/views.py
+
+
+logger = logging.getLogger(__name__)
+# sales/views.py - VenteViewSet complet corrigé
+
+
+logger = logging.getLogger(__name__)
+
+
 class VenteViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des ventes
+    """
     permission_classes = [IsAuthenticated, HasAgenceAccess]
     filter_backends = [DjangoFilterBackend,
                        filters.SearchFilter, filters.OrderingFilter]
@@ -91,6 +106,9 @@ class VenteViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def sans_facture(self, request):
+        """
+        Récupère les ventes sans facture
+        """
         queryset = self.get_queryset().filter(
             status__in=['approved', 'completed'])
         ventes_avec_facture = Facture.objects.values_list(
@@ -104,51 +122,20 @@ class VenteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def submit(self, request, pk=None):
+        """
+        Soumet une vente pour approbation.
+        Vérifie le stock mais NE LE SOUSTRAIT PAS (seulement vérification).
+        """
         vente = self.get_object()
-        if vente.status != 'draft':
-            return Response({'error': f'Seule une vente en brouillon peut être soumise. Statut actuel: {vente.status}'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        warehouse = vente.agence.warehouses.filter(is_default=True).first()
-        if not warehouse:
-            warehouse = vente.agence.warehouses.filter(is_active=True).first()
-        if not warehouse:
-            return Response({'error': f'Aucun entrepôt configuré pour l\'agence {vente.agence.nom}.'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        stock_insuffisant = []
-        for item in vente.items.all():
-            stock = WarehouseStock.objects.filter(
-                product=item.product, warehouse=warehouse, variant=item.variant).first()
-            if not stock:
-                stock_insuffisant.append(
-                    {'product': item.product.name, 'message': 'Stock non configuré dans cet entrepôt'})
-            elif stock.quantity < item.quantity:
-                stock_insuffisant.append({
-                    'product': item.product.name,
-                    'disponible': stock.quantity,
-                    'demande': item.quantity,
-                    'manquant': item.quantity - stock.quantity
-                })
-        if stock_insuffisant:
-            return Response({'error': 'Stock insuffisant pour soumettre la vente', 'details': stock_insuffisant},
-                            status=status.HTTP_400_BAD_REQUEST)
-        vente.status = 'pending_approval'
-        vente.save()
-        return Response({'success': True, 'message': 'Vente soumise avec succès', 'data': VenteDetailSerializer(vente).data})
 
-    @action(detail=True, methods=['post'])
-    @transaction.atomic
-    def approve(self, request, pk=None):
-        vente = self.get_object()
-        user = request.user
-        if not (user.est_chef_agence() or user.est_pdg()):
-            return Response({'error': 'Seul le chef d\'agence ou le PDG peut approuver une vente'},
-                            status=status.HTTP_403_FORBIDDEN)
-        if not user.est_pdg() and not user.peut_acceder_agence(vente.agence.id):
-            return Response({'error': 'Vous n\'avez pas accès à cette agence'},
-                            status=status.HTTP_403_FORBIDDEN)
-        if vente.status != 'pending_approval':
-            return Response({'error': f'Seule une vente en attente peut être approuvée. Statut actuel: {vente.status}'},
-                            status=status.HTTP_400_BAD_REQUEST)
+        # Vérification du statut
+        if vente.status != 'draft':
+            return Response(
+                {'error': f'Seule une vente en brouillon peut être soumise. Statut actuel: {vente.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Récupération de l'entrepôt
         warehouse = vente.agence.warehouses.filter(is_default=True).first()
         if not warehouse:
             warehouse = vente.agence.warehouses.filter(is_active=True).first()
@@ -156,119 +143,347 @@ class VenteViewSet(viewsets.ModelViewSet):
             from inventaire.models import get_default_warehouse
             warehouse = get_default_warehouse(vente.agence)
         if not warehouse:
-            return Response({'error': f'Aucun entrepôt configuré pour l\'agence {vente.agence.nom}.'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': f'Aucun entrepôt configuré pour l\'agence {vente.agence.nom}.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # === VÉRIFICATION DU STOCK (AGRÉGATION DES QUANTITÉS) ===
         stock_insuffisant = []
+        stock_verification = {}
+
+        # 1. Grouper les items par produit et variante
         for item in vente.items.all():
+            key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
+
+            if key not in stock_verification:
+                stock_verification[key] = {
+                    'product': item.product,
+                    'variant': item.variant,
+                    'total_quantity': 0
+                }
+            stock_verification[key]['total_quantity'] += item.quantity
+
+        # 2. Vérifier le stock pour chaque groupe (NE PAS SOUSTRAIRE)
+        for key, group in stock_verification.items():
+            stock = WarehouseStock.objects.filter(
+                product=group['product'],
+                warehouse=warehouse,
+                variant=group['variant']
+            ).first()
+
+            if not stock:
+                stock_insuffisant.append({
+                    'product': group['product'].name,
+                    'variant': group['variant'].name if group['variant'] else 'Sans variante',
+                    'message': 'Stock non configuré dans cet entrepôt'
+                })
+            elif stock.quantity < group['total_quantity']:
+                stock_insuffisant.append({
+                    'product': group['product'].name,
+                    'variant': group['variant'].name if group['variant'] else 'Sans variante',
+                    'disponible': stock.quantity,
+                    'demande': group['total_quantity'],
+                    'manquant': group['total_quantity'] - stock.quantity
+                })
+
+        if stock_insuffisant:
+            return Response(
+                {'error': 'Stock insuffisant pour soumettre la vente',
+                    'details': stock_insuffisant},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 3. Mettre à jour le statut (NE PAS SOUSTRAIRE LE STOCK ICI)
+        vente.status = 'pending_approval'
+        vente.save()
+
+        return Response({
+            'success': True,
+            'message': 'Vente soumise avec succès',
+            'data': VenteDetailSerializer(vente).data
+        })
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def approve(self, request, pk=None):
+        """
+        Approuve une vente et réduit le stock de manière groupée.
+        La soustraction se fait UNIQUEMENT via le signal StockMovement.
+        """
+        vente = self.get_object()
+        user = request.user
+
+        # Vérification des permissions
+        if not (user.est_chef_agence() or user.est_pdg()):
+            return Response(
+                {'error': 'Seul le chef d\'agence ou le PDG peut approuver une vente'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if not user.est_pdg() and not user.peut_acceder_agence(vente.agence.id):
+            return Response(
+                {'error': 'Vous n\'avez pas accès à cette agence'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Vérification du statut
+        if vente.status != 'pending_approval':
+            return Response(
+                {'error': f'Seule une vente en attente peut être approuvée. Statut actuel: {vente.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Récupération de l'entrepôt
+        warehouse = vente.agence.warehouses.filter(is_default=True).first()
+        if not warehouse:
+            warehouse = vente.agence.warehouses.filter(is_active=True).first()
+        if not warehouse:
+            from inventaire.models import get_default_warehouse
+            warehouse = get_default_warehouse(vente.agence)
+        if not warehouse:
+            return Response(
+                {'error': f'Aucun entrepôt configuré pour l\'agence {vente.agence.nom}.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # === GROUPEMENT DES ITEMS PAR PRODUIT/VARIANTE ===
+        stock_verification = {}
+
+        # 1. Agrégation des quantités par produit et variante
+        for item in vente.items.all():
+            key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
+
+            if key not in stock_verification:
+                stock_verification[key] = {
+                    'product': item.product,
+                    'variant': item.variant,
+                    'total_quantity': 0,
+                    'items': [],
+                    'unit_price': item.prix_unitaire
+                }
+            stock_verification[key]['total_quantity'] += item.quantity
+            stock_verification[key]['items'].append(item)
+
+        # Journalisation pour débogage
+        logger.info(f"=== VENTE {vente.reference} - AGRÉGATION DU STOCK ===")
+        for key, group in stock_verification.items():
+            logger.info(
+                f"Produit: {group['product'].name}, "
+                f"Variant: {group['variant'].name if group['variant'] else 'Sans variante'}, "
+                f"Quantité totale: {group['total_quantity']}, "
+                f"Nombre de lignes: {len(group['items'])}"
+            )
+
+        # 2. Vérification du stock pour chaque groupe
+        stock_insuffisant = []
+        for key, group in stock_verification.items():
             try:
                 stock = WarehouseStock.objects.get(
-                    product=item.product, warehouse=warehouse, variant=item.variant)
-                if stock.quantity < item.quantity:
+                    product=group['product'],
+                    warehouse=warehouse,
+                    variant=group['variant']
+                )
+                if stock.quantity < group['total_quantity']:
                     stock_insuffisant.append({
-                        'product': item.product.name,
+                        'product': group['product'].name,
+                        'variant': group['variant'].name if group['variant'] else 'Sans variante',
                         'disponible': stock.quantity,
-                        'demande': item.quantity,
-                        'manquant': item.quantity - stock.quantity
+                        'demande': group['total_quantity'],
+                        'manquant': group['total_quantity'] - stock.quantity
                     })
             except WarehouseStock.DoesNotExist:
-                stock_insuffisant.append(
-                    {'product': item.product.name, 'message': 'Produit non trouvé dans l\'entrepôt', 'demande': item.quantity})
+                stock_insuffisant.append({
+                    'product': group['product'].name,
+                    'variant': group['variant'].name if group['variant'] else 'Sans variante',
+                    'message': 'Produit non trouvé dans l\'entrepôt',
+                    'demande': group['total_quantity']
+                })
+
         if stock_insuffisant:
-            return Response({'error': 'Stock insuffisant pour approuver la vente', 'details': stock_insuffisant},
-                            status=status.HTTP_400_BAD_REQUEST)
-        for item in vente.items.all():
-            stock = WarehouseStock.objects.get(
-                product=item.product, warehouse=warehouse, variant=item.variant)
-            stock.quantity -= item.quantity
-            stock.save()
-            item.stock_preleve = True
-            item.warehouse_source = warehouse
-            item.save()
-            StockMovement.objects.create(
-                movement_type='out', reference_type='sale', reference_id=vente.id,
-                product=item.product, variant=item.variant, quantity=item.quantity,
-                from_warehouse=warehouse, unit_price=item.prix_unitaire,
-                notes=f"Vente {vente.reference} approuvée", created_by=user
+            return Response(
+                {'error': 'Stock insuffisant pour approuver la vente',
+                    'details': stock_insuffisant},
+                status=status.HTTP_400_BAD_REQUEST
             )
-            total_stock = WarehouseStock.objects.filter(
-                product=item.product).aggregate(total=Sum('quantity'))['total'] or 0
-            item.product.stock_quantity = total_stock
-            item.product.save()
+
+        # 3. CRÉER LES MOUVEMENTS DE STOCK (LE SIGNAL VA GÉRER LA SOUSTRACTION)
+        # ⚠️ IMPORTANT: Ne PAS soustraire manuellement le stock ici !
+        for key, group in stock_verification.items():
+            # Créer un SEUL mouvement de stock pour le groupe
+            # Le signal post_save de StockMovement va automatiquement:
+            # - Soustraire du stock de l'entrepôt source
+            # - Mettre à jour le stock global du produit
+            StockMovement.objects.create(
+                movement_type='out',
+                reference_type='sale',
+                reference_id=vente.id,
+                product=group['product'],
+                variant=group['variant'],
+                quantity=group['total_quantity'],
+                from_warehouse=warehouse,
+                unit_price=group['unit_price'],
+                notes=f"Vente {vente.reference} approuvée - {group['total_quantity']} unités prélevées",
+                created_by=user
+            )
+
+            # Marquer tous les items du groupe comme prélevés
+            for item in group['items']:
+                item.stock_preleve = True
+                item.warehouse_source = warehouse
+                item.save()
+
+        # 4. Mettre à jour le statut de la vente
         vente.status = 'approved'
         vente.approved_by = user
         vente.date_approbation = timezone.now()
         vente.save()
-        return Response({'success': True, 'message': 'Vente approuvée avec succès', 'data': VenteDetailSerializer(vente).data})
+
+        return Response({
+            'success': True,
+            'message': 'Vente approuvée avec succès',
+            'data': VenteDetailSerializer(vente).data
+        })
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
+        """
+        Rejette une vente en attente d'approbation.
+        """
         vente = self.get_object()
+
         if vente.status != 'pending_approval':
-            return Response({'error': f'Seule une vente en attente peut être rejetée. Statut actuel: {vente.status}'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': f'Seule une vente en attente peut être rejetée. Statut actuel: {vente.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         motif = request.data.get('motif')
         if not motif:
-            return Response({'error': 'Un motif de rejet est requis'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Un motif de rejet est requis'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         vente.status = 'rejected'
         vente.motif_rejet = motif
         vente.save()
-        return Response({'success': True, 'message': 'Vente rejetée', 'data': VenteDetailSerializer(vente).data})
+
+        return Response({
+            'success': True,
+            'message': 'Vente rejetée',
+            'data': VenteDetailSerializer(vente).data
+        })
 
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
+        """
+        Complète une vente approuvée (marque comme terminée).
+        """
         vente = self.get_object()
+
         if vente.status != 'approved':
-            return Response({'error': f'Seule une vente approuvée peut être complétée. Statut actuel: {vente.status}'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': f'Seule une vente approuvée peut être complétée. Statut actuel: {vente.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         if vente.montant_paye < vente.total:
             reste = vente.total - vente.montant_paye
-            return Response({'error': f'Vente non entièrement payée. Reste à payer: {reste} FCFA'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': f'Vente non entièrement payée. Reste à payer: {reste} FCFA'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         vente.status = 'completed'
         vente.save()
-        return Response({'success': True, 'message': 'Vente complétée avec succès', 'data': VenteDetailSerializer(vente).data})
+
+        return Response({
+            'success': True,
+            'message': 'Vente complétée avec succès',
+            'data': VenteDetailSerializer(vente).data
+        })
 
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def cancel(self, request, pk=None):
+        """
+        Annule une vente et restaure le stock de manière groupée.
+        La restauration se fait UNIQUEMENT via le signal StockMovement.
+        """
         vente = self.get_object()
+
         if vente.status in ['completed', 'cancelled']:
-            return Response({'error': f'Cette vente ne peut pas être annulée car elle est {vente.status}'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': f'Cette vente ne peut pas être annulée car elle est {vente.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # === GROUPEMENT DES ITEMS POUR L'ANNULATION ===
+        stock_restauration = {}
+
+        # 1. Agrégation des quantités par produit/variante pour les items prélevés
         for item in vente.items.filter(stock_preleve=True):
-            if item.warehouse_source:
-                try:
-                    stock = WarehouseStock.objects.get(
-                        product=item.product, warehouse=item.warehouse_source, variant=item.variant)
-                    stock.quantity += item.quantity
-                    stock.save()
-                    StockMovement.objects.create(
-                        movement_type='in', reference_type='sale', reference_id=vente.id,
-                        product=item.product, variant=item.variant, quantity=item.quantity,
-                        to_warehouse=item.warehouse_source, unit_price=item.prix_unitaire,
-                        notes=f"Annulation vente {vente.reference}", created_by=request.user
-                    )
-                    total_stock = WarehouseStock.objects.filter(
-                        product=item.product).aggregate(total=Sum('quantity'))['total'] or 0
-                    item.product.stock_quantity = total_stock
-                    item.product.save()
-                except WarehouseStock.DoesNotExist:
-                    pass
+            key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
+
+            if key not in stock_restauration:
+                stock_restauration[key] = {
+                    'product': item.product,
+                    'variant': item.variant,
+                    'total_quantity': 0,
+                    'items': [],
+                    'unit_price': item.prix_unitaire,
+                    'warehouse': item.warehouse_source
+                }
+            stock_restauration[key]['total_quantity'] += item.quantity
+            stock_restauration[key]['items'].append(item)
+
+        # 2. Restaurer le stock via des mouvements (LE SIGNAL VA GÉRER LA RESTAURATION)
+        # ⚠️ IMPORTANT: Ne PAS ajouter manuellement le stock ici !
+        for key, group in stock_restauration.items():
+            if group['warehouse']:
+                # Créer un seul mouvement d'entrée pour le groupe
+                # Le signal post_save va automatiquement ajouter au stock
+                StockMovement.objects.create(
+                    movement_type='in',
+                    reference_type='sale',
+                    reference_id=vente.id,
+                    product=group['product'],
+                    variant=group['variant'],
+                    quantity=group['total_quantity'],
+                    to_warehouse=group['warehouse'],
+                    unit_price=group['unit_price'],
+                    notes=f"Annulation vente {vente.reference} - {group['total_quantity']} unités restituées",
+                    created_by=request.user
+                )
+
+        # 3. Mettre à jour le statut de la vente
         vente.status = 'cancelled'
         vente.save()
-        return Response({'success': True, 'message': 'Vente annulée avec succès', 'data': VenteDetailSerializer(vente).data})
+
+        return Response({
+            'success': True,
+            'message': 'Vente annulée avec succès',
+            'data': VenteDetailSerializer(vente).data
+        })
 
     @action(detail=False, methods=['get'])
     def stats(self, request):
+        """
+        Statistiques des ventes.
+        """
         user = request.user
+
         if user.est_pdg() or user.est_drh():
             ventes = Vente.objects.all()
         elif user.est_chef_agence():
             ventes = Vente.objects.filter(agence__in=user.get_agences())
         else:
             ventes = Vente.objects.filter(vendeur=user)
+
         today = timezone.now().date()
         ventes_today = ventes.filter(date_vente__date=today)
+
         return Response({
             'total': ventes.count(),
             'total_ca': ventes.filter(status='completed').aggregate(total=Sum('total'))['total'] or 0,
@@ -307,7 +522,6 @@ class PaiementViewSet(viewsets.ModelViewSet):
                 Q(vente__agence_id__in=agences_ids) |
                 Q(client__ventes__agence_id__in=agences_ids)
             ).distinct()
-        # Chargement des relations pour éviter les requêtes N+1
         return qs.select_related('facture__client', 'client', 'encaisse_par')
 
     def perform_create(self, serializer):
@@ -446,7 +660,6 @@ class DevisViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Ce devis n\'a pas de client associé, impossible de créer une vente.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # Créer la vente à partir du devis (sans TVA)
         vente = Vente.objects.create(
             agence=devis.agence,
             client=devis.client,
@@ -461,7 +674,6 @@ class DevisViewSet(viewsets.ModelViewSet):
             notes=f"Vente issue du devis {devis.reference}\n{devis.notes or ''}"
         )
 
-        # Copier les lignes du devis vers la vente (sans tva)
         for item in devis.items.all():
             VenteItem.objects.create(
                 vente=vente,
@@ -493,7 +705,6 @@ class DevisViewSet(viewsets.ModelViewSet):
         styles = getSampleStyleSheet()
         elements = []
 
-        # En-tête
         header_data = [
             ['SEYDI GROUP SARL', f'DEVIS {devis.reference}'],
             ['Solutions Digitales', ''],
@@ -512,7 +723,6 @@ class DevisViewSet(viewsets.ModelViewSet):
         elements.append(header_table)
         elements.append(Spacer(1, 0.5*cm))
 
-        # Infos client / devis
         if devis.client:
             denomination = devis.client.raison_sociale or devis.client.nom
             if devis.client.prenom:
@@ -539,7 +749,6 @@ class DevisViewSet(viewsets.ModelViewSet):
                 Paragraph("Aucun client associé", styles['Normal']))
         elements.append(Spacer(1, 0.5*cm))
 
-        # Tableau des articles
         elements.append(Paragraph("ARTICLES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
                                                              fontSize=14, textColor=colors.HexColor('#1e40af'))))
         table_data = [['Désignation', 'Référence',
@@ -560,7 +769,6 @@ class DevisViewSet(viewsets.ModelViewSet):
         elements.append(table)
         elements.append(Spacer(1, 0.5*cm))
 
-        # Totaux (sans TVA)
         totals_data = [
             ['Sous-total :', f"{devis.sous_total:,.0f} FCFA"],
             ['Remise :', f"{devis.remise:,.0f} FCFA"],
@@ -576,7 +784,6 @@ class DevisViewSet(viewsets.ModelViewSet):
         elements.append(totals_table)
         elements.append(Spacer(1, 0.5*cm))
 
-        # Conditions et notes
         if devis.conditions:
             elements.append(Paragraph("CONDITIONS", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
                                                                    fontSize=14, textColor=colors.HexColor('#1e40af'))))
@@ -587,7 +794,6 @@ class DevisViewSet(viewsets.ModelViewSet):
                                                               fontSize=14, textColor=colors.HexColor('#1e40af'))))
             elements.append(Paragraph(devis.notes, styles['Normal']))
 
-        # Pied de page
         footer_text = f'<para align="center" fontSize="8" textColor="gray">Devis valable jusqu’au {devis.date_expiration.strftime("%d/%m/%Y")}.<br/>SEYDI GROUP SARL - RCCM: SN DKR 2023 B 123 - Généré le {timezone.now().strftime("%d/%m/%Y à %H:%M")}</para>'
         elements.append(Paragraph(footer_text, styles['Normal']))
 
@@ -597,7 +803,6 @@ class DevisViewSet(viewsets.ModelViewSet):
         response = HttpResponse(pdf, content_type='application/pdf')
         response['Content-Disposition'] = f'inline; filename="devis_{devis.reference}.pdf"'
         return response
-# sales/views.py - FactureViewSet complet corrigé
 
 
 class FactureViewSet(viewsets.ModelViewSet):
@@ -605,7 +810,7 @@ class FactureViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend,
                        filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'type_facture', 'client',
-                        'agence', 'montant_restant']  # ✅ ajout de montant_restant
+                        'agence', 'montant_restant']
     search_fields = ['reference', 'client__nom', 'client__raison_sociale']
     ordering_fields = ['date_facture',
                        'date_echeance', 'total_ttc', 'created_at']
@@ -686,7 +891,6 @@ class FactureViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Cette facture est déjà payée'}, status=status.HTTP_400_BAD_REQUEST)
         if facture.status == 'cancelled':
             return Response({'error': 'Cette facture est annulée'}, status=status.HTTP_400_BAD_REQUEST)
-        # Ajoutez ici l'envoi d'email si nécessaire
         return Response({'success': True, 'message': f'Relance envoyée pour la facture {facture.reference}',
                          'date_relance': timezone.now().strftime('%d/%m/%Y à %H:%M')})
 
@@ -750,7 +954,6 @@ class FactureViewSet(viewsets.ModelViewSet):
         styles = getSampleStyleSheet()
         elements = []
 
-        # En-tête société
         header_data = [
             ['SEYDI GROUP SARL', f'FACTURE {facture.reference}'],
             ['Solutions Digitales', ''],
@@ -774,7 +977,6 @@ class FactureViewSet(viewsets.ModelViewSet):
                         16*cm], style=[('LINEBELOW', (0, 0), (-1, -1), 0.5, colors.grey)]))
         elements.append(Spacer(1, 0.5*cm))
 
-        # Infos client / facture
         if facture.client:
             denomination = facture.client.raison_sociale or facture.client.nom
             if facture.client.prenom:
@@ -810,7 +1012,6 @@ class FactureViewSet(viewsets.ModelViewSet):
                 Paragraph("Aucun client associé", styles['Normal']))
         elements.append(Spacer(1, 0.5*cm))
 
-        # Tableau des articles
         elements.append(Paragraph("ARTICLES", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
                                                              fontSize=14, textColor=colors.HexColor('#1e40af'), spaceAfter=0.3*cm)))
         vente_items = facture.vente.items.all() if facture.vente else []
@@ -838,7 +1039,6 @@ class FactureViewSet(viewsets.ModelViewSet):
         elements.append(table)
         elements.append(Spacer(1, 0.5*cm))
 
-        # Totaux
         totals_data = [
             ['Sous-total HT:', f"{facture.sous_total:,.0f} FCFA"],
             ['TVA (18%):', f"{facture.tva:,.0f} FCFA"],
@@ -861,7 +1061,6 @@ class FactureViewSet(viewsets.ModelViewSet):
         elements.append(totals_table)
         elements.append(Spacer(1, 0.5*cm))
 
-        # Conditions, notes, pied de page
         if facture.conditions_paiement:
             elements.append(Paragraph("CONDITIONS DE PAIEMENT", ParagraphStyle('SectionStyle', parent=styles['Heading2'],
                                                                                fontSize=14, textColor=colors.HexColor('#1e40af'))))
@@ -879,7 +1078,6 @@ class FactureViewSet(viewsets.ModelViewSet):
             elements.append(Paragraph(facture.pied_de_page, styles['Normal']))
             elements.append(Spacer(1, 0.5*cm))
 
-        # Signatures
         signature_data = [['Le Client', 'L\'Entreprise'], [
             '', ''], ['Signature et cachet', 'Signature et cachet']]
         signature_table = Table(signature_data, colWidths=[8*cm, 8*cm])

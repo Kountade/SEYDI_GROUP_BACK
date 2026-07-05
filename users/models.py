@@ -16,9 +16,6 @@ from django.core.mail import EmailMultiAlternatives
 from django.utils.html import strip_tags
 from django.template.loader import render_to_string
 
-# Supprimer cet import qui cause l'erreur circulaire :
-# from django.contrib.auth.admin import UserAdmin
-
 
 class CustomUserManager(BaseUserManager):
     """
@@ -143,20 +140,16 @@ class Agence(models.Model):
             list: Liste de tuples (code_role, libellé_role)
 
         Note:
-            - Agence Principale: chef_agence, commercial
-            - Agence Secondaire: chef_agence, gestionnaire_stock, commercial
+            - Agence Principale: chef_agence, gestionnaire_stock, commercial, comptable
+            - Agence Secondaire: chef_agence, gestionnaire_stock, commercial, comptable
         """
-        if self.type_agence == 'principale':
-            return [
-                ('chef_agence', 'Chef d\'agence'),
-                ('commercial', 'Commercial'),
-            ]
-        else:
-            return [
-                ('chef_agence', 'Chef d\'agence'),
-                ('gestionnaire_stock', 'Gestionnaire de stock'),
-                ('commercial', 'Commercial'),
-            ]
+        # ✅ MODIFICATION : Même liste pour les deux types d'agences
+        return [
+            ('chef_agence', 'Chef d\'agence'),
+            ('gestionnaire_stock', 'Gestionnaire de stock'),
+            ('commercial', 'Commercial'),
+            ('comptable', 'Comptable'),  # ✅ NOUVEAU RÔLE AJOUTÉ
+        ]
 
     def get_nombre_roles(self):
         """
@@ -202,6 +195,7 @@ class RoleAgence(models.Model):
         ('chef_agence', 'Chef d\'agence'),
         ('gestionnaire_stock', 'Gestionnaire de stock'),
         ('commercial', 'Commercial'),
+        ('comptable', 'Comptable'),  # ✅ NOUVEAU RÔLE AJOUTÉ
     )
 
     user = models.ForeignKey('CustomUser', on_delete=models.CASCADE,
@@ -244,8 +238,6 @@ class RoleAgence(models.Model):
         return f"{self.user.email} - {self.agence.nom} : {self.get_role_display()}"
 
 
-# users/models.py - Classe CustomUser complète
-
 class CustomUser(AbstractUser):
     """
     Modèle utilisateur personnalisé avec gestion multi-agences et rôles
@@ -253,7 +245,7 @@ class CustomUser(AbstractUser):
     Ce modèle étend AbstractUser pour supporter:
     - Authentification par email (username non requis)
     - Rôles globaux (PDG, DRH)
-    - Rôles par agence (Chef, Commercial, Gestionnaire)
+    - Rôles par agence (Chef, Commercial, Gestionnaire, Comptable)
     - Informations professionnelles complètes
     """
 
@@ -334,6 +326,7 @@ class CustomUser(AbstractUser):
             ("can_manage_inventory", "Peut gérer l'inventaire"),
             ("can_manage_rh", "Peut gérer les ressources humaines"),
             ("can_view_all_agences", "Peut voir toutes les agences"),
+            ("can_manage_accounting", "Peut gérer la comptabilité"),  # ✅ NOUVELLE PERMISSION
         ]
 
     def __str__(self):
@@ -392,6 +385,16 @@ class CustomUser(AbstractUser):
         if agence_id:
             return self.a_role_dans_agence(agence_id, 'gestionnaire_stock')
         return self.roles_agence.filter(role='gestionnaire_stock', est_actif=True).exists()
+
+    def est_comptable(self, agence_id=None):
+        """
+        Vérifie si l'utilisateur est comptable
+        - Si agence_id est fourni: vérifie pour cette agence
+        - Sinon: vérifie s'il est comptable dans au moins une agence
+        """
+        if agence_id:
+            return self.a_role_dans_agence(agence_id, 'comptable')
+        return self.roles_agence.filter(role='comptable', est_actif=True).exists()
 
     def est_vendeur(self, agence_id=None):
         """Alias de est_commercial pour compatibilité"""
@@ -525,6 +528,9 @@ class CustomUser(AbstractUser):
 
 @receiver(reset_password_token_created)
 def password_reset_token_created(reset_password_token, *args, **kwargs):
+    """
+    Signal pour envoyer un email de réinitialisation de mot de passe
+    """
     sitelink = "http://localhost:5173/"
     token = "{}".format(reset_password_token.key)
     full_link = str(sitelink) + str("password-reset/") + str(token)

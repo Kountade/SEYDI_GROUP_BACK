@@ -23,11 +23,11 @@ def update_warehouse_stock(sender, instance, created, **kwargs):
     """
     if not created:
         return
-    
+
     # Éviter la double mise à jour (si déjà traité dans la vue)
     if hasattr(instance, '_stock_updated'):
         return
-    
+
     # Pour les entrées
     if instance.to_warehouse:
         warehouse_stock, created = WarehouseStock.objects.get_or_create(
@@ -43,7 +43,7 @@ def update_warehouse_stock(sender, instance, created, **kwargs):
         warehouse_stock.quantity += instance.quantity
         warehouse_stock.updated_by = instance.created_by
         warehouse_stock.save()
-        
+
         # Mettre à jour le stock global du produit
         product = instance.product
         total_stock = WarehouseStock.objects.filter(product=product).aggregate(
@@ -52,7 +52,7 @@ def update_warehouse_stock(sender, instance, created, **kwargs):
         if product.stock_quantity != total_stock:
             product.stock_quantity = total_stock
             product.save(update_fields=['stock_quantity', 'updated_at'])
-    
+
     # Pour les sorties
     if instance.from_warehouse:
         warehouse_stock = WarehouseStock.objects.filter(
@@ -64,7 +64,7 @@ def update_warehouse_stock(sender, instance, created, **kwargs):
             warehouse_stock.quantity -= instance.quantity
             warehouse_stock.updated_by = instance.created_by
             warehouse_stock.save()
-            
+
             # Mettre à jour le stock global du produit
             product = instance.product
             total_stock = WarehouseStock.objects.filter(product=product).aggregate(
