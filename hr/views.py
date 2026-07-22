@@ -1,3 +1,7 @@
+from django.contrib.auth import get_user_model
+import logging
+from django.core.exceptions import PermissionDenied
+from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -415,34 +419,364 @@ class PerformanceReviewViewset(viewsets.ModelViewSet):
     ordering_fields = ['review_date']
 
 
+# views.py - ExpenseClaimViewset COMPLET
+
+
+logger = logging.getLogger(__name__)
+
+# hr/views.py - ExpenseClaimViewset (sans employee)
+# hr/views.py - ExpenseClaimViewset SANS employee
+
+# hr/views.py - ExpenseClaimViewset avec création automatique
+
+
+CustomUser = get_user_model()
+logger = logging.getLogger(__name__)
+
+
 class ExpenseClaimViewset(viewsets.ModelViewSet):
-    """Viewset pour les notes de frais"""
+    """
+    Viewset pour les notes de frais
+    """
     permission_classes = [permissions.IsAuthenticated]
     queryset = ExpenseClaim.objects.all()
     serializer_class = ExpenseClaimSerializer
     filter_backends = [DjangoFilterBackend,
                        filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['description']
-    filterset_fields = ['employee', 'expense_type', 'status']
+    filterset_fields = ['expense_type', 'status', 'date']
+    ordering_fields = ['date', 'created_at', 'amount']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        user = self.request.user
+
+        if user.role_global in ['pdg', 'drh']:
+            return super().get_queryset()
+
+        if self._is_comptable(user):
+            return super().get_queryset()
+
+        return super().get_queryset()
+
+    def perform_create(self, serializer):
+        serializer.save()
+
+    # ============================================
+    # 🔧 FONCTION UTILITAIRE - Récupérer ou créer un Employee
+    # ============================================
+
+    def _get_or_create_employee(self, user):
+        """
+        Récupère ou crée un profil Employee pour l'utilisateur
+        """
+        try:
+            # Essayer de récupérer l'Employee existant
+            employee = Employee.objects.get(user=user)
+            logger.info(
+                f"✅ Employee trouvé: {employee.employee_number} - {user.email}")
+            return employee
+        except Employee.DoesNotExist:
+            # Créer un Employee automatiquement
+            logger.info(
+                f"⚠️ Création automatique d'un Employee pour {user.email}")
+
+            employee = Employee.objects.create(
+                user=user,
+                employee_number=f"EMP{user.id:06d}",
+                hire_date=timezone.now().date(),
+                contract_type='cdi',
+                base_salary=0,
+                emergency_contact_name=user.get_full_name() or user.email or 'À définir',
+                emergency_contact_phone='À définir',
+                emergency_contact_relation='À définir',
+            )
+
+            logger.info(
+                f"✅ Employee créé: {employee.employee_number} - {user.email}")
+            return employee
+
+    # ============================================
+    # 🔥 VALIDATION RH
+    # ============================================
 
     @action(detail=True, methods=['post'])
-    def approve(self, request, pk=None):
-        """Approuver une note de frais"""
+    def validate(self, request, pk=None):
+        """RH/Manager valide la note"""
         expense = self.get_object()
+        user = request.user
+
+        if not self._can_validate(user):
+            return Response(
+                {'error': 'Seul le RH, DRH ou PDG peut valider'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if expense.status != 'pending':
+            return Response(
+                {'error': f'Statut actuel: {expense.get_status_display()}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ✅ Récupérer ou créer l'Employee pour l'utilisateur connecté
+        try:
+            employee = self._get_or_create_employee(user)
+        except Exception as e:
+            logger.error(
+                f"❌ Erreur lors de la récupération/création de l'Employee: {e}")
+            return Response(
+                {'error': 'Impossible de trouver ou créer votre profil employé. Contactez le RH.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         expense.status = 'approved'
-        expense.approved_by = Employee.objects.get(user=request.user)
-        expense.approval_date = timezone.now()
+        expense.validated_by = employee
+        expense.validation_date = timezone.now()
+        expense.validation_comments = request.data.get('comments', '')
         expense.save()
-        return Response({'message': 'Note de frais approuvée'})
+
+        return Response({
+            'message': '✅ Note validée avec succès',
+            'expense': ExpenseClaimSerializer(expense).data
+        })
+
+    # ============================================
+    # 🔥 PAIEMENT COMPTABLE
+    # ============================================
+
+    @action(detail=True, methods=['post'])
+    def pay(self, request, pk=None):
+        """Comptable approuve le paiement"""
+        expense = self.get_object()
+        user = request.user
+
+        if not self._can_pay(user):
+            return Response(
+                {'error': 'Seul un comptable, DRH ou PDG peut payer'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if expense.status != 'approved':
+            return Response(
+                {'error': 'La note doit être validée avant le paiement'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ✅ Récupérer ou créer l'Employee pour l'utilisateur connecté
+        try:
+            employee = self._get_or_create_employee(user)
+        except Exception as e:
+            logger.error(
+                f"❌ Erreur lors de la récupération/création de l'Employee: {e}")
+            return Response(
+                {'error': 'Impossible de trouver ou créer votre profil employé. Contactez le RH.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        expense.status = 'paid'
+        expense.paid_by = employee
+        expense.payment_date = timezone.now()
+        expense.payment_reference = request.data.get('payment_reference', '')
+        expense.save()
+
+        return Response({
+            'message': '✅ Paiement approuvé avec succès',
+            'expense': ExpenseClaimSerializer(expense).data
+        })
+
+    # ============================================
+    # 🔥 REJET
+    # ============================================
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        """Rejeter une note de frais"""
+        """RH/Manager rejette la note"""
         expense = self.get_object()
+        user = request.user
+
+        if not self._can_validate(user):
+            return Response(
+                {'error': 'Seul le RH, DRH ou PDG peut rejeter'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if expense.status != 'pending':
+            return Response(
+                {'error': f'Statut actuel: {expense.get_status_display()}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ✅ Récupérer ou créer l'Employee pour l'utilisateur connecté
+        try:
+            employee = self._get_or_create_employee(user)
+        except Exception as e:
+            logger.error(
+                f"❌ Erreur lors de la récupération/création de l'Employee: {e}")
+            return Response(
+                {'error': 'Impossible de trouver ou créer votre profil employé. Contactez le RH.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         expense.status = 'rejected'
-        expense.rejection_reason = request.data.get('reason', '')
+        expense.validated_by = employee
+        expense.validation_date = timezone.now()
+        expense.rejection_reason = request.data.get('reason', 'Aucun motif')
         expense.save()
-        return Response({'message': 'Note de frais rejetée'})
+
+        return Response({
+            'message': '❌ Note rejetée',
+            'expense': ExpenseClaimSerializer(expense).data
+        })
+
+    # ============================================
+    # 🔥 ANNULATION
+    # ============================================
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Annuler une note"""
+        expense = self.get_object()
+
+        if expense.status != 'pending':
+            return Response(
+                {'error': 'Seules les notes en attente peuvent être annulées'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        expense.status = 'cancelled'
+        expense.save()
+
+        return Response({
+            'message': '✅ Note annulée avec succès',
+            'expense': ExpenseClaimSerializer(expense).data
+        })
+
+    # ============================================
+    # 🔒 FONCTIONS DE PERMISSION
+    # ============================================
+
+    def _is_comptable(self, user):
+        """Vérifie si l'utilisateur est comptable"""
+        try:
+            employee = Employee.objects.get(user=user)
+            if hasattr(employee, 'roles_agence'):
+                return employee.roles_agence.filter(
+                    role='comptable',
+                    est_actif=True
+                ).exists()
+        except Employee.DoesNotExist:
+            pass
+        return False
+
+    def _can_validate(self, user):
+        """Vérifie si l'utilisateur peut valider"""
+        return user.role_global in ['pdg', 'drh']
+
+    def _can_pay(self, user):
+        """Vérifie si l'utilisateur peut payer"""
+        if user.role_global in ['pdg', 'drh']:
+            return True
+        return self._is_comptable(user)
+# ============================================
+
+
+class ExpenseClaimSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(
+        source='employee.full_name', read_only=True)
+    expense_type_display = serializers.CharField(
+        source='get_expense_type_display', read_only=True)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
+    approved_by_name = serializers.CharField(
+        source='approved_by.full_name', read_only=True)
+    amount_formatted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ExpenseClaim
+        fields = '__all__'
+        read_only_fields = ('created_at', 'updated_at',
+                            'approval_date', 'payment_date')
+
+    def get_amount_formatted(self, obj):
+        """Formatage du montant avec séparateur d'espace"""
+        if obj.amount:
+            return f"{int(obj.amount):,}".replace(',', ' ') + ' GNF'
+        return '0 GNF'
+
+    def validate(self, data):
+        """Validation personnalisée"""
+        # Vérifier que la date n'est pas dans le futur
+        if data.get('date') and data['date'] > timezone.now().date():
+            raise serializers.ValidationError(
+                "La date de la dépense ne peut pas être dans le futur"
+            )
+
+        # Vérifier que le montant est positif
+        if data.get('amount') and data['amount'] <= 0:
+            raise serializers.ValidationError(
+                "Le montant doit être supérieur à 0"
+            )
+
+        return data
+
+
+# ============================================
+
+
+@action(detail=False, methods=['get'])
+def dashboard_stats(self, request):
+    """Statistiques avancées pour le dashboard"""
+    user = request.user
+    queryset = self.get_queryset()
+
+    # Filtrer par année
+    year = request.query_params.get('year', timezone.now().year)
+    try:
+        year = int(year)
+        queryset = queryset.filter(date__year=year)
+    except ValueError:
+        pass
+
+    # Statistiques mensuelles
+    monthly_stats = queryset.extra(
+        select={'month': "EXTRACT(month FROM date)"}
+    ).values('month').annotate(
+        total_amount=Sum('amount'),
+        count=Count('id')
+    ).order_by('month')
+
+    # Top des types de dépenses
+    top_expenses = queryset.values('expense_type').annotate(
+        total=Sum('amount'),
+        count=Count('id')
+    ).order_by('-total')[:5]
+
+    # Délai moyen de traitement (approuvées)
+    approved_expenses = queryset.filter(
+        status='approved',
+        approval_date__isnull=False
+    )
+    avg_processing_time = approved_expenses.aggregate(
+        avg_days=Avg(
+            models.ExpressionWrapper(
+                models.F('approval_date') - models.F('created_at'),
+                output_field=models.DurationField()
+            )
+        )
+    )
+
+    stats = {
+        'year': year,
+        'total_expenses': queryset.count(),
+        'total_amount': queryset.aggregate(total=Sum('amount'))['total'] or 0,
+        'monthly': list(monthly_stats),
+        'top_expense_types': list(top_expenses),
+        'avg_processing_days': avg_processing_time['avg_days'].days if avg_processing_time['avg_days'] else 0,
+        'pending_count': queryset.filter(status='pending').count(),
+        'pending_amount': queryset.filter(status='pending').aggregate(total=Sum('amount'))['total'] or 0,
+    }
+
+    return Response(stats)
 
 
 class DocumentViewset(viewsets.ModelViewSet):

@@ -1,3 +1,6 @@
+import os
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from django.utils import timezone
 from .models import *
@@ -305,21 +308,176 @@ class PerformanceReviewSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ('overall_rating', 'created_at', 'updated_at')
 
+# hr/serializers.py - ExpenseClaimSerializer CORRIGÉ
+# hr/serializers.py - ExpenseClaimSerializer (sans employee)
+
+
+# hr/serializers.py - ExpenseClaimSerializer SANS employee
 
 class ExpenseClaimSerializer(serializers.ModelSerializer):
-    employee_name = serializers.CharField(
-        source='employee.full_name', read_only=True)
+    """
+    Serializer pour les notes de frais
+    """
+
     expense_type_display = serializers.CharField(
-        source='get_expense_type_display', read_only=True)
+        source='get_expense_type_display',
+        read_only=True
+    )
+
     status_display = serializers.CharField(
-        source='get_status_display', read_only=True)
-    approved_by_name = serializers.CharField(
-        source='approved_by.full_name', read_only=True)
+        source='get_status_display',
+        read_only=True
+    )
+
+    validated_by_name = serializers.CharField(
+        source='validated_by.full_name',
+        read_only=True
+    )
+
+    paid_by_name = serializers.CharField(
+        source='paid_by.full_name',
+        read_only=True
+    )
+
+    amount_formatted = serializers.SerializerMethodField()
+    receipt_url = serializers.SerializerMethodField()
 
     class Meta:
         model = ExpenseClaim
         fields = '__all__'
-        read_only_fields = ('created_at', 'updated_at')
+        read_only_fields = (
+            'created_at',
+            'updated_at',
+            'validation_date',
+            'payment_date',
+            'expense_type_display',
+            'status_display',
+            'validated_by_name',
+            'paid_by_name',
+            'amount_formatted',
+            'receipt_url',
+        )
+
+    def get_amount_formatted(self, obj):
+        if obj.amount:
+            return f"{int(obj.amount):,}".replace(',', ' ') + ' GNF'
+        return '0 GNF'
+
+    def get_receipt_url(self, obj):
+        if obj.receipt and hasattr(obj.receipt, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.receipt.url)
+            return obj.receipt.url
+        return None
+
+    def validate(self, data):
+        errors = {}
+
+        if data.get('date') and data['date'] > timezone.now().date():
+            errors['date'] = "La date ne peut pas être dans le futur"
+
+        if data.get('amount'):
+            if data['amount'] <= 0:
+                errors['amount'] = "Le montant doit être supérieur à 0"
+            elif data['amount'] > 999999999:
+                errors['amount'] = "Le montant ne peut pas dépasser 999 999 999 GNF"
+
+        if data.get('description'):
+            description = data['description'].strip()
+            if len(description) < 3:
+                errors['description'] = "La description doit contenir au moins 3 caractères"
+
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        return data
+
+    def validate_receipt(self, value):
+        if not value:
+            return value
+
+        if value.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError(
+                "Le fichier ne doit pas dépasser 5MB")
+
+        valid_extensions = ['.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx']
+        ext = os.path.splitext(value.name)[1].lower()
+        if ext not in valid_extensions:
+            raise serializers.ValidationError(
+                f"Format non supporté. Utilisez: {', '.join(valid_extensions)}"
+            )
+
+        return value
+
+# ============================================
+# 📊 SERIALIZER POUR LA CRÉATION UNIQUEMENT
+# ============================================
+
+
+class ExpenseClaimCreateSerializer(ExpenseClaimSerializer):
+    """
+    Serializer simplifié pour la création
+    Champs requis minimaux
+    """
+
+    class Meta(ExpenseClaimSerializer.Meta):
+        read_only_fields = ExpenseClaimSerializer.Meta.read_only_fields + (
+            'status',
+        )
+
+    def validate(self, data):
+        """
+        Validation minimale pour la création
+        """
+        # ✅ Vérifier que l'employee est présent
+        if not data.get('employee'):
+            raise serializers.ValidationError(
+                "L'employé est requis pour créer une note de frais"
+            )
+
+        # ✅ Vérifier que le montant est présent
+        if not data.get('amount'):
+            raise serializers.ValidationError(
+                "Le montant est requis"
+            )
+
+        return super().validate(data)
+
+
+# ============================================
+# 📊 SERIALIZER POUR L'APPROBATION
+# ============================================
+
+class ExpenseClaimApproveSerializer(serializers.Serializer):
+    """
+    Serializer pour l'approbation/rejet
+    """
+    comments = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Commentaires sur l'approbation"
+    )
+
+    reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Motif du rejet"
+    )
+
+    def validate_comments(self, value):
+        if value and len(value) > 500:
+            raise serializers.ValidationError(
+                "Les commentaires ne peuvent pas dépasser 500 caractères"
+            )
+        return value
+
+    def validate_reason(self, value):
+        if value and len(value) > 500:
+            raise serializers.ValidationError(
+                "Le motif ne peut pas dépasser 500 caractères"
+            )
+        return value
 
 
 class DocumentSerializer(serializers.ModelSerializer):

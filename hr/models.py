@@ -1,3 +1,6 @@
+from django.contrib.auth import get_user_model
+from datetime import date
+import json
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
@@ -8,6 +11,7 @@ from django.core.files.base import ContentFile
 import uuid
 from datetime import date, timedelta
 from django.db import models  # import local pour éviter circular import
+
 
 class Department(models.Model):
     """Département de l'entreprise"""
@@ -45,20 +49,13 @@ class Position(models.Model):
     def __str__(self):
         return f"{self.title} - {self.department.name}"
 
-import uuid
-import json
-import qrcode
-from io import BytesIO
-from datetime import date
-from django.db import models
-from django.core.files.base import ContentFile
-from django.contrib.auth import get_user_model
 
 CustomUser = get_user_model()
 
+
 class Employee(models.Model):
     """Employé (peut ne pas avoir de compte utilisateur associé)"""
-    
+
     CONTRACT_TYPES = (
         ('cdi', 'CDI'),
         ('cdd', 'CDD'),
@@ -265,13 +262,14 @@ class Employee(models.Model):
     @property
     def remaining_leave_days(self):
         """Calcule les jours de congé restants (nécessite la relation 'leaves')"""
-      
+
         taken = self.leaves.filter(
             leave_type='annual',
             status='approved',
             start_date__year=date.today().year
         ).aggregate(total=models.Sum('duration_days'))['total'] or 0
         return 25 - taken  # 25 jours de congés par an
+
 
 class Leave(models.Model):
     """Demande de congé"""
@@ -684,8 +682,13 @@ class PerformanceReview(models.Model):
         super().save(*args, **kwargs)
 
 
+# hr/models.py - ExpenseClaim MODIFIÉ (suppression de employee seulement)
+
+# hr/models.py - ExpenseClaim SANS employee
+
 class ExpenseClaim(models.Model):
     """Note de frais"""
+
     EXPENSE_TYPES = (
         ('transport', 'Transport'),
         ('meal', 'Repas'),
@@ -696,14 +699,16 @@ class ExpenseClaim(models.Model):
     )
 
     STATUS_CHOICES = (
-        ('pending', 'En attente'),
-        ('approved', 'Approuvé'),
+        ('pending', 'En attente de validation RH'),
+        ('approved', 'Validé par RH - En attente de paiement'),
+        ('paid', 'Payé par Comptabilité'),
         ('rejected', 'Rejeté'),
-        ('paid', 'Remboursé'),
+        ('cancelled', 'Annulé'),
     )
 
-    employee = models.ForeignKey(
-        Employee, on_delete=models.CASCADE, related_name='expenses')
+    # ❌ SUPPRESSION DU CHAMP employee
+    # employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='expenses')
+
     expense_type = models.CharField(max_length=20, choices=EXPENSE_TYPES)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     date = models.DateField()
@@ -712,18 +717,46 @@ class ExpenseClaim(models.Model):
 
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default='pending')
-    approved_by = models.ForeignKey(
-        Employee, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_expenses')
-    approval_date = models.DateTimeField(null=True, blank=True)
-    rejection_reason = models.TextField(blank=True, null=True)
 
+    # ✅ Validation RH
+    validated_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='validated_expenses'
+    )
+    validation_date = models.DateTimeField(null=True, blank=True)
+    validation_comments = models.TextField(blank=True, null=True)
+
+    # ✅ Paiement Comptable
+    paid_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='paid_expenses'
+    )
     payment_date = models.DateTimeField(null=True, blank=True)
+    payment_reference = models.CharField(max_length=100, blank=True, null=True)
+
+    # ✅ Rejet
+    rejection_reason = models.TextField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.employee} - {self.get_expense_type_display()} - {self.amount}"
+        return f"{self.get_expense_type_display()} - {self.amount} GNF - {self.date}"
+
+    class Meta:
+        verbose_name = "Note de frais"
+        verbose_name_plural = "Notes de frais"
+        ordering = ['-created_at']
+        permissions = [
+            ("can_validate_expense", "Peut valider une note de frais (RH/Manager)"),
+            ("can_pay_expense", "Peut payer une note de frais (Comptable)"),
+        ]
 
 
 class Document(models.Model):

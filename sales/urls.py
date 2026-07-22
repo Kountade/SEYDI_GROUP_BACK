@@ -16,3 +16,6 @@ urlpatterns = [
     path('dashboard/ventes/', DashboardVentesView.as_view(),
          name='dashboard-ventes'),
 ]
+
+
+router.register('point-de-vente', VenteViewSet, basename='point-de-vente')
