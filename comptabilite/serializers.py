@@ -1,3 +1,4 @@
+# comptabilite/serializers.py
 """
 Serializers pour l'application Comptabilité / Finance
 """
@@ -7,8 +8,12 @@ from django.db.models import Sum
 from django.utils import timezone
 from .models import *
 from users.serializers import AgenceSimpleSerializer, UserSerializer
-from sales.serializers import ClientSimpleSerializer
-from purchases.serializers import SupplierSimpleSerializer
+
+# ✅ IMPORT CORRIGÉ - Utilisation de ClientSerializer au lieu de ClientSimpleSerializer
+from sales.serializers import ClientSerializer
+
+# ✅ IMPORT CORRIGÉ - Utilisation de SupplierListSerializer au lieu de SupplierSimpleSerializer
+from purchases.serializers import SupplierListSerializer
 
 
 # ============================================================
@@ -48,7 +53,6 @@ class PlanComptableSerializer(serializers.ModelSerializer):
         return niveaux.get(obj.niveau, f'Niveau {obj.niveau}')
 
     def validate(self, data):
-        # Vérifier que le parent est d'un niveau inférieur
         if data.get('parent'):
             if data.get('niveau', 1) <= data['parent'].niveau:
                 raise serializers.ValidationError(
@@ -178,7 +182,6 @@ class EcritureSerializer(serializers.ModelSerializer):
                             'updated_at', 'total_debit', 'total_credit')
 
     def validate(self, data):
-        # Vérifier que la date comptable n'est pas dans le futur
         if data.get('date_comptable') and data['date_comptable'] > timezone.now().date():
             raise serializers.ValidationError({
                 'date_comptable': 'La date comptable ne peut pas être dans le futur'
@@ -206,7 +209,6 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
                 'lignes': 'Au moins une ligne d\'écriture est requise'
             })
 
-        # Vérifier l'équilibre
         total_debit = sum(l.get('debit', 0) for l in lignes)
         total_credit = sum(l.get('credit', 0) for l in lignes)
 
@@ -220,11 +222,9 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         lignes_data = validated_data.pop('lignes')
 
-        # Calculer les totaux
         total_debit = sum(l.get('debit', 0) for l in lignes_data)
         total_credit = sum(l.get('credit', 0) for l in lignes_data)
 
-        # Créer l'écriture
         ecriture = Ecriture.objects.create(
             **validated_data,
             total_debit=total_debit,
@@ -232,7 +232,6 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
             created_by=self.context['request'].user
         )
 
-        # Créer les lignes
         for ligne_data in lignes_data:
             LigneEcriture.objects.create(ecriture=ecriture, **ligne_data)
 
@@ -346,7 +345,6 @@ class BalanceCreateSerializer(serializers.ModelSerializer):
                 'date_debut': 'La date début doit être antérieure à la date fin'
             })
 
-        # Vérifier qu'il n'y a pas déjà une balance pour cette période
         if Balance.objects.filter(
             agence=data['agence'],
             date_debut=data['date_debut'],
@@ -370,10 +368,15 @@ class FactureComptableSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
+    
+    # ✅ CORRIGÉ : Utilisation de ClientSerializer au lieu de ClientSimpleSerializer
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default=None)
+    
+    # ✅ CORRIGÉ : Utilisation de SupplierListSerializer au lieu de SupplierSimpleSerializer
     fournisseur_nom = serializers.CharField(
         source='fournisseur.company_name', read_only=True, default=None)
+    
     pourcentage_paye = serializers.SerializerMethodField()
     jours_retard = serializers.SerializerMethodField()
     created_by_email = serializers.EmailField(
@@ -420,13 +423,11 @@ class FactureComptableCreateSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, data):
-        # Vérifier que la date d'échéance est postérieure à la date de facture
         if data['date_echeance'] < data['date_facture']:
             raise serializers.ValidationError({
                 'date_echeance': 'La date d\'échéance doit être postérieure à la date de facture'
             })
 
-        # Vérifier que client ou fournisseur est présent selon le type
         if data['type_facture'] == 'client' and not data.get('client'):
             raise serializers.ValidationError({
                 'client': 'Un client est requis pour une facture client'
@@ -451,10 +452,15 @@ class ReglementSerializer(serializers.ModelSerializer):
     mode_reglement_display = serializers.CharField(
         source='get_mode_reglement_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
+    
+    # ✅ CORRIGÉ : Utilisation de ClientSerializer
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default=None)
+    
+    # ✅ CORRIGÉ : Utilisation de SupplierListSerializer
     fournisseur_nom = serializers.CharField(
         source='fournisseur.company_name', read_only=True, default=None)
+    
     facture_reference = serializers.CharField(
         source='facture.reference', read_only=True, default=None)
     created_by_email = serializers.EmailField(
@@ -489,7 +495,6 @@ class ReglementCreateSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, data):
-        # Vérifier que client ou fournisseur est présent selon le type
         if data['type_reglement'] == 'client' and not data.get('client'):
             raise serializers.ValidationError({
                 'client': 'Un client est requis pour un règlement client'
@@ -500,7 +505,6 @@ class ReglementCreateSerializer(serializers.ModelSerializer):
                 'fournisseur': 'Un fournisseur est requis pour un règlement fournisseur'
             })
 
-        # Vérifier que le montant ne dépasse pas le montant restant
         facture = data.get('facture')
         if facture:
             if data['montant'] > facture.montant_restant:
@@ -612,7 +616,6 @@ class ClotureCreateSerializer(serializers.ModelSerializer):
                 'date_debut': 'La date début doit être antérieure à la date fin'
             })
 
-        # Vérifier qu'il n'y a pas déjà une clôture pour cette période
         if ClotureComptable.objects.filter(
             agence=data['agence'],
             date_debut=data['date_debut'],
@@ -677,21 +680,14 @@ class DashboardSerializer(serializers.Serializer):
     """Serializer pour le tableau de bord financier"""
     periode = serializers.CharField()
     agence_id = serializers.IntegerField()
-
-    # Indicateurs clés
     ca_total = serializers.DecimalField(max_digits=15, decimal_places=2)
     ca_evolution = serializers.DecimalField(max_digits=10, decimal_places=2)
     marge_brute = serializers.DecimalField(max_digits=15, decimal_places=2)
-    marge_pourcentage = serializers.DecimalField(
-        max_digits=10, decimal_places=2)
+    marge_pourcentage = serializers.DecimalField(max_digits=10, decimal_places=2)
     tresorerie = serializers.DecimalField(max_digits=15, decimal_places=2)
-
-    # Détails
     ventes_mois = serializers.DecimalField(max_digits=15, decimal_places=2)
     achats_mois = serializers.DecimalField(max_digits=15, decimal_places=2)
     charges_mois = serializers.DecimalField(max_digits=15, decimal_places=2)
-
-    # Alertes
     alertes = serializers.ListField(child=serializers.DictField())
 
 
@@ -699,16 +695,10 @@ class CompteResultatSerializer(serializers.Serializer):
     """Serializer pour le compte de résultat"""
     periode = serializers.CharField()
     agence_id = serializers.IntegerField()
-
-    # Produits
     produits = serializers.DictField()
     total_produits = serializers.DecimalField(max_digits=15, decimal_places=2)
-
-    # Charges
     charges = serializers.DictField()
     total_charges = serializers.DecimalField(max_digits=15, decimal_places=2)
-
-    # Résultat
     resultat = serializers.DecimalField(max_digits=15, decimal_places=2)
     type_resultat = serializers.CharField()
 
@@ -717,16 +707,10 @@ class BilanSerializer(serializers.Serializer):
     """Serializer pour le bilan comptable"""
     date = serializers.DateField()
     agence_id = serializers.IntegerField()
-
-    # Actif
     actif = serializers.DictField()
     total_actif = serializers.DecimalField(max_digits=15, decimal_places=2)
-
-    # Passif
     passif = serializers.DictField()
     total_passif = serializers.DecimalField(max_digits=15, decimal_places=2)
-
-    # Équilibre
     est_equilibre = serializers.BooleanField()
 
 
@@ -734,13 +718,9 @@ class TresorerieSerializer(serializers.Serializer):
     """Serializer pour la trésorerie"""
     agence_id = serializers.IntegerField()
     date = serializers.DateField()
-
     solde_initial = serializers.DecimalField(max_digits=15, decimal_places=2)
     encaissements = serializers.DecimalField(max_digits=15, decimal_places=2)
     decaissements = serializers.DecimalField(max_digits=15, decimal_places=2)
     solde_final = serializers.DecimalField(max_digits=15, decimal_places=2)
-
-    details_encaissements = serializers.ListField(
-        child=serializers.DictField())
-    details_decaissements = serializers.ListField(
-        child=serializers.DictField())
+    details_encaissements = serializers.ListField(child=serializers.DictField())
+    details_decaissements = serializers.ListField(child=serializers.DictField())
