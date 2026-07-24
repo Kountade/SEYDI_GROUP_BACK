@@ -1,19 +1,23 @@
-# comptabilite/signals.py
+# comptabilite/signals.py - Version COMPLÈTE et CORRIGÉE
 """
 Signaux pour l'application Comptabilité
 Création automatique des écritures, mise à jour des soldes, etc.
 """
 
+import logging
 from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
-from django.db import transaction
+from django.db import models
 from decimal import Decimal
+from django.utils import timezone
 from .models import (
     Ecriture, LigneEcriture, SoldeCompte,
     FactureComptable, Reglement, ClotureComptable,
-    Balance, LigneBalance
+    Balance, LigneBalance, Journal, PlanComptable
 )
 from .utils import calculer_total_ecriture
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -26,7 +30,6 @@ def ecriture_pre_save(sender, instance, **kwargs):
     Avant la sauvegarde d'une écriture, calculer les totaux
     """
     if instance.pk:
-        # Récupérer les lignes existantes
         lignes = LigneEcriture.objects.filter(ecriture=instance)
         total_debit = lignes.aggregate(total=models.Sum('debit'))[
             'total'] or Decimal('0')
@@ -79,14 +82,12 @@ def facture_comptable_pre_save(sender, instance, **kwargs):
     Avant la sauvegarde d'une facture, calculer le montant restant
     """
     if instance.pk:
-        # Calculer le montant payé à partir des règlements
         total_paye = instance.reglements.aggregate(
             total=models.Sum('montant')
         )['total'] or Decimal('0')
         instance.montant_paye = total_paye
         instance.montant_restant = instance.montant_ttc - total_paye
 
-        # Mettre à jour le statut automatiquement
         if instance.montant_paye >= instance.montant_ttc:
             instance.status = 'payee'
         elif instance.montant_paye > 0:
@@ -101,6 +102,7 @@ def facture_comptable_post_save(sender, instance, created, **kwargs):
     Après la création d'une facture, créer l'écriture comptable automatiquement
     """
     if created and instance.status != 'annulee':
+        logger.info(f"📝 Signal déclenché pour facture {instance.reference}")
         creer_ecriture_facture(instance)
 
 
@@ -114,26 +116,22 @@ def reglement_post_save(sender, instance, created, **kwargs):
     Après la sauvegarde d'un règlement, mettre à jour la facture
     """
     if instance.facture:
-        # Mettre à jour la facture
         instance.facture.save()
-
-        # Créer l'écriture de règlement si la facture existe
         if created:
+            logger.info(
+                f"📝 Signal déclenché pour règlement {instance.reference}")
             creer_ecriture_reglement(instance)
 
 
 # ============================================================
-# FONCTIONS UTILITAIRES POUR LES SIGNALS
+# FONCTIONS UTILITAIRES POUR LES SIGNALS (CORRIGÉES)
 # ============================================================
 
 def mettre_a_jour_soldes(ecriture):
     """
     Met à jour les soldes des comptes après validation d'une écriture
     """
-    from django.db import models
-
     for ligne in ecriture.lignes.all():
-        # Mettre à jour ou créer le solde pour la date
         solde, created = SoldeCompte.objects.get_or_create(
             compte=ligne.compte,
             agence=ecriture.agence,
@@ -159,11 +157,30 @@ def mettre_a_jour_soldes(ecriture):
 def creer_ecriture_facture(facture):
     """
     Crée automatiquement une écriture comptable pour une facture
+    ✅ CORRIGÉ : Avec logs et gestion des erreurs
     """
-    from django.utils import timezone
-    from .models import Journal, Ecriture, LigneEcriture, PlanComptable
+    logger.info(f"📝 Création écriture pour facture {facture.reference}")
 
-    # Trouver le journal approprié
+    # 1. VÉRIFIER LES COMPTES NÉCESSAIRES
+    comptes_necessaires = {
+        'client': '411',
+        'ventes': '701',
+        'tva': '445',
+        'achats': '601',
+        'fournisseur': '401'
+    }
+
+    comptes_existants = {}
+    for nom, code in comptes_necessaires.items():
+        try:
+            compte = PlanComptable.objects.get(code=code, is_active=True)
+            comptes_existants[nom] = compte
+            logger.info(f"✅ Compte {code} trouvé")
+        except PlanComptable.DoesNotExist:
+            logger.warning(f"⚠️ Compte {code} non trouvé !")
+            comptes_existants[nom] = None
+
+    # 2. TROUVER LE JOURNAL
     journal_type = 'ventes' if facture.type_facture == 'client' else 'achats'
     try:
         journal = Journal.objects.get(
@@ -171,16 +188,18 @@ def creer_ecriture_facture(facture):
             type_journal=journal_type,
             is_active=True
         )
+        logger.info(f"✅ Journal {journal.code} trouvé")
     except Journal.DoesNotExist:
-        # Journal par défaut
         journal = Journal.objects.filter(
             agence=facture.agence,
             is_active=True
         ).first()
         if not journal:
+            logger.error("❌ Aucun journal trouvé !")
             return
+        logger.info(f"✅ Journal par défaut {journal.code} utilisé")
 
-    # Créer l'écriture
+    # 3. CRÉER L'ÉCRITURE
     libelle = f"Facture {facture.type_facture} {facture.reference}"
     ecriture = Ecriture.objects.create(
         journal=journal,
@@ -194,124 +213,120 @@ def creer_ecriture_facture(facture):
         status='brouillon',
         created_by=facture.created_by
     )
+    logger.info(f"✅ Écriture {ecriture.reference} créée")
 
-    # Créer les lignes
+    lignes_crees = 0
+
+    # 4. CRÉER LES LIGNES
     if facture.type_facture == 'client':
         # Facture client
-        # Débit: Client (411)
-        try:
-            compte_client = PlanComptable.objects.get(
-                code='411',
-                is_active=True
-            )
+        if comptes_existants['client']:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_client,
+                compte=comptes_existants['client'],
                 debit=facture.montant_ttc,
                 credit=0,
                 libelle=f"Client {facture.client.nom if facture.client else ''}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne Client créée: {facture.montant_ttc}")
 
-        # Crédit: Ventes (701)
-        try:
-            compte_ventes = PlanComptable.objects.get(
-                code='701',
-                is_active=True
-            )
+        if comptes_existants['ventes']:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_ventes,
+                compte=comptes_existants['ventes'],
                 debit=0,
                 credit=facture.montant_ht,
                 libelle=f"Ventes {facture.reference}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne Ventes créée: {facture.montant_ht}")
 
-        # Crédit: TVA (445)
-        if facture.montant_tva > 0:
-            try:
-                compte_tva = PlanComptable.objects.get(
-                    code='445',
-                    is_active=True
-                )
-                LigneEcriture.objects.create(
-                    ecriture=ecriture,
-                    compte=compte_tva,
-                    debit=0,
-                    credit=facture.montant_tva,
-                    libelle=f"TVA {facture.reference}"
-                )
-            except PlanComptable.DoesNotExist:
-                pass
+        if facture.montant_tva > 0 and comptes_existants['tva']:
+            LigneEcriture.objects.create(
+                ecriture=ecriture,
+                compte=comptes_existants['tva'],
+                debit=0,
+                credit=facture.montant_tva,
+                libelle=f"TVA {facture.reference}"
+            )
+            lignes_crees += 1
+            logger.info(f"✅ Ligne TVA créée: {facture.montant_tva}")
 
     else:
         # Facture fournisseur
-        # Débit: Achats (601)
-        try:
-            compte_achats = PlanComptable.objects.get(
-                code='601',
-                is_active=True
-            )
+        if comptes_existants['achats']:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_achats,
+                compte=comptes_existants['achats'],
                 debit=facture.montant_ht,
                 credit=0,
                 libelle=f"Achats {facture.reference}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne Achats créée: {facture.montant_ht}")
 
-        # Débit: TVA (445)
-        if facture.montant_tva > 0:
-            try:
-                compte_tva = PlanComptable.objects.get(
-                    code='445',
-                    is_active=True
-                )
-                LigneEcriture.objects.create(
-                    ecriture=ecriture,
-                    compte=compte_tva,
-                    debit=facture.montant_tva,
-                    credit=0,
-                    libelle=f"TVA {facture.reference}"
-                )
-            except PlanComptable.DoesNotExist:
-                pass
-
-        # Crédit: Fournisseur (401)
-        try:
-            compte_fournisseur = PlanComptable.objects.get(
-                code='401',
-                is_active=True
-            )
+        if facture.montant_tva > 0 and comptes_existants['tva']:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_fournisseur,
+                compte=comptes_existants['tva'],
+                debit=facture.montant_tva,
+                credit=0,
+                libelle=f"TVA {facture.reference}"
+            )
+            lignes_crees += 1
+            logger.info(f"✅ Ligne TVA créée: {facture.montant_tva}")
+
+        if comptes_existants['fournisseur']:
+            LigneEcriture.objects.create(
+                ecriture=ecriture,
+                compte=comptes_existants['fournisseur'],
                 debit=0,
                 credit=facture.montant_ttc,
                 libelle=f"Fournisseur {facture.fournisseur.company_name if facture.fournisseur else ''}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne Fournisseur créée: {facture.montant_ttc}")
 
-    # Mettre à jour les totaux
+    # 5. METTRE À JOUR LES TOTAUX
     totaux = calculer_total_ecriture(ecriture.id)
     ecriture.total_debit = totaux['debit']
     ecriture.total_credit = totaux['credit']
     ecriture.save(update_fields=['total_debit', 'total_credit'])
 
+    logger.info(
+        f"✅ Écriture finalisée: {lignes_crees} lignes, {ecriture.total_debit} = {ecriture.total_credit}")
+
+    if lignes_crees == 0:
+        logger.warning("⚠️ Aucune ligne créée ! Vérifiez les comptes.")
+
 
 def creer_ecriture_reglement(reglement):
     """
     Crée automatiquement une écriture comptable pour un règlement
+    ✅ CORRIGÉ : Avec logs et gestion des erreurs
     """
-    from .models import Journal, Ecriture, LigneEcriture, PlanComptable
+    logger.info(f"📝 Création écriture pour règlement {reglement.reference}")
 
-    # Trouver le journal approprié
+    # 1. VÉRIFIER LES COMPTES NÉCESSAIRES
+    comptes_necessaires = {
+        'client': '411',
+        'fournisseur': '401',
+        'banque': '512',
+        'caisse': '101'
+    }
+
+    comptes_existants = {}
+    for nom, code in comptes_necessaires.items():
+        try:
+            compte = PlanComptable.objects.get(code=code, is_active=True)
+            comptes_existants[nom] = compte
+            logger.info(f"✅ Compte {code} trouvé")
+        except PlanComptable.DoesNotExist:
+            logger.warning(f"⚠️ Compte {code} non trouvé !")
+            comptes_existants[nom] = None
+
+    # 2. TROUVER LE JOURNAL
     journal_type = 'banque' if reglement.mode_reglement in [
         'virement', 'carte'] else 'caisse'
     try:
@@ -320,16 +335,18 @@ def creer_ecriture_reglement(reglement):
             type_journal=journal_type,
             is_active=True
         )
+        logger.info(f"✅ Journal {journal.code} trouvé")
     except Journal.DoesNotExist:
-        # Journal par défaut
         journal = Journal.objects.filter(
             agence=reglement.agence,
             is_active=True
         ).first()
         if not journal:
+            logger.error("❌ Aucun journal trouvé !")
             return
+        logger.info(f"✅ Journal par défaut {journal.code} utilisé")
 
-    # Créer l'écriture
+    # 3. CRÉER L'ÉCRITURE
     libelle = f"Règlement {reglement.type_reglement} {reglement.reference}"
     ecriture = Ecriture.objects.create(
         journal=journal,
@@ -343,82 +360,75 @@ def creer_ecriture_reglement(reglement):
         status='brouillon',
         created_by=reglement.created_by
     )
+    logger.info(f"✅ Écriture {ecriture.reference} créée")
 
-    # Créer les lignes
+    lignes_crees = 0
+
+    # 4. CRÉER LES LIGNES
     if reglement.type_reglement == 'client':
         # Règlement client
-        # Débit: Banque/Caisse
-        compte_code = '512' if reglement.mode_reglement in [
-            'virement', 'carte'] else '101'
-        try:
-            compte_banque = PlanComptable.objects.get(
-                code=compte_code,
-                is_active=True
-            )
+        compte_code = 'banque' if reglement.mode_reglement in [
+            'virement', 'carte'] else 'caisse'
+        compte_source = comptes_existants.get(compte_code)
+
+        if compte_source:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_banque,
+                compte=compte_source,
                 debit=reglement.montant,
                 credit=0,
                 libelle=f"Encaissement client {reglement.client.nom if reglement.client else ''}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne {compte_code} créée: {reglement.montant}")
 
-        # Crédit: Client (411)
-        try:
-            compte_client = PlanComptable.objects.get(
-                code='411',
-                is_active=True
-            )
+        if comptes_existants['client']:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_client,
+                compte=comptes_existants['client'],
                 debit=0,
                 credit=reglement.montant,
                 libelle=f"Client {reglement.client.nom if reglement.client else ''}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne Client créée: {reglement.montant}")
 
     else:
         # Règlement fournisseur
-        # Débit: Fournisseur (401)
-        try:
-            compte_fournisseur = PlanComptable.objects.get(
-                code='401',
-                is_active=True
-            )
+        if comptes_existants['fournisseur']:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_fournisseur,
+                compte=comptes_existants['fournisseur'],
                 debit=reglement.montant,
                 credit=0,
                 libelle=f"Fournisseur {reglement.fournisseur.company_name if reglement.fournisseur else ''}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne Fournisseur créée: {reglement.montant}")
 
-        # Crédit: Banque/Caisse
-        compte_code = '512' if reglement.mode_reglement in [
-            'virement', 'carte'] else '101'
-        try:
-            compte_banque = PlanComptable.objects.get(
-                code=compte_code,
-                is_active=True
-            )
+        compte_code = 'banque' if reglement.mode_reglement in [
+            'virement', 'carte'] else 'caisse'
+        compte_source = comptes_existants.get(compte_code)
+
+        if compte_source:
             LigneEcriture.objects.create(
                 ecriture=ecriture,
-                compte=compte_banque,
+                compte=compte_source,
                 debit=0,
                 credit=reglement.montant,
                 libelle=f"Décaissement fournisseur {reglement.fournisseur.company_name if reglement.fournisseur else ''}"
             )
-        except PlanComptable.DoesNotExist:
-            pass
+            lignes_crees += 1
+            logger.info(f"✅ Ligne {compte_code} créée: {reglement.montant}")
 
-    # Mettre à jour les totaux
+    # 5. METTRE À JOUR LES TOTAUX
     totaux = calculer_total_ecriture(ecriture.id)
     ecriture.total_debit = totaux['debit']
     ecriture.total_credit = totaux['credit']
     ecriture.save(update_fields=['total_debit', 'total_credit'])
+
+    logger.info(
+        f"✅ Écriture finalisée: {lignes_crees} lignes, {ecriture.total_debit} = {ecriture.total_credit}")
+
+    if lignes_crees == 0:
+        logger.warning("⚠️ Aucune ligne créée ! Vérifiez les comptes.")

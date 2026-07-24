@@ -188,6 +188,10 @@ class EcritureSerializer(serializers.ModelSerializer):
             })
         return data
 
+# comptabilite/serializers.py - Partie EcritureCreateSerializer
+
+# comptabilite/serializers.py - EcritureCreateSerializer corrigé
+
 
 class EcritureCreateSerializer(serializers.ModelSerializer):
     """Serializer pour la création d'une écriture"""
@@ -196,18 +200,78 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ecriture
         fields = (
-            'journal', 'agence', 'date_ecriture', 'date_comptable',
-            'libelle', 'piece_justificative',
-            'source_type', 'source_id',
-            'lignes', 'notes'
+            'journal',
+            'agence',
+            'date_ecriture',
+            'date_comptable',
+            'libelle',
+            'piece_justificative',
+            'source_type',
+            'source_id',
+            'lignes',
+            'notes'
         )
 
+    def validate_agence(self, value):
+        """
+        ✅ VALIDATION DE L'AGENCE - Convertit l'ID en objet
+        """
+        from users.models import Agence
+
+        # Si c'est déjà un objet Agence
+        if isinstance(value, Agence):
+            return value
+
+        # Si c'est un ID (nombre)
+        try:
+            agence_id = int(value)
+            agence = Agence.objects.get(id=agence_id, est_active=True)
+            return agence
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("ID d'agence invalide")
+        except Agence.DoesNotExist:
+            raise serializers.ValidationError("Agence non trouvée ou inactive")
+
+    def validate_journal(self, value):
+        """
+        ✅ VALIDATION DU JOURNAL
+        """
+        # Si c'est déjà un objet Journal
+        if hasattr(value, 'code'):
+            return value
+
+        # Si c'est un ID (nombre)
+        try:
+            journal_id = int(value)
+            from comptabilite.models import Journal
+            journal = Journal.objects.get(id=journal_id, is_active=True)
+            return journal
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("ID de journal invalide")
+        except Journal.DoesNotExist:
+            raise serializers.ValidationError("Journal non trouvé ou inactif")
+
+    def validate_lignes(self, value):
+        """
+        ✅ VALIDATION DES LIGNES
+        """
+        if not value:
+            raise serializers.ValidationError(
+                "Au moins une ligne d'écriture est requise")
+
+        for i, ligne in enumerate(value):
+            if (ligne.get('debit', 0) > 0 or ligne.get('credit', 0) > 0) and not ligne.get('compte'):
+                raise serializers.ValidationError({
+                    'lignes': f'La ligne {i+1} a un montant mais pas de compte'
+                })
+
+        return value
+
     def validate(self, data):
+        """
+        ✅ VALIDATION GLOBALE
+        """
         lignes = data.get('lignes', [])
-        if not lignes:
-            raise serializers.ValidationError({
-                'lignes': 'Au moins une ligne d\'écriture est requise'
-            })
 
         total_debit = sum(l.get('debit', 0) for l in lignes)
         total_credit = sum(l.get('credit', 0) for l in lignes)
@@ -220,20 +284,46 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
+        """
+        ✅ CRÉATION DE L'ÉCRITURE
+        """
         lignes_data = validated_data.pop('lignes')
+
+        # Récupérer l'agence (déjà validée)
+        agence = validated_data.get('agence')
+
+        # Récupérer le journal (déjà validé)
+        journal = validated_data.get('journal')
 
         total_debit = sum(l.get('debit', 0) for l in lignes_data)
         total_credit = sum(l.get('credit', 0) for l in lignes_data)
 
+        # ✅ Créer l'écriture AVEC les objets (pas les IDs)
         ecriture = Ecriture.objects.create(
-            **validated_data,
+            journal=journal,  # Objet Journal
+            agence=agence,    # Objet Agence
+            date_ecriture=validated_data.get('date_ecriture'),
+            date_comptable=validated_data.get('date_comptable'),
+            libelle=validated_data.get('libelle'),
+            piece_justificative=validated_data.get('piece_justificative', ''),
+            source_type=validated_data.get('source_type', ''),
+            source_id=validated_data.get('source_id'),
+            notes=validated_data.get('notes', ''),
             total_debit=total_debit,
             total_credit=total_credit,
-            created_by=self.context['request'].user
+            created_by=self.context['request'].user,
+            status='brouillon'
         )
 
+        # ✅ Créer les lignes
         for ligne_data in lignes_data:
-            LigneEcriture.objects.create(ecriture=ecriture, **ligne_data)
+            LigneEcriture.objects.create(
+                ecriture=ecriture,
+                compte=ligne_data['compte'],  # Objet PlanComptable
+                debit=ligne_data.get('debit', 0),
+                credit=ligne_data.get('credit', 0),
+                libelle=ligne_data.get('libelle', '')
+            )
 
         return ecriture
 
@@ -368,15 +458,15 @@ class FactureComptableSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-    
+
     # ✅ CORRIGÉ : Utilisation de ClientSerializer au lieu de ClientSimpleSerializer
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default=None)
-    
+
     # ✅ CORRIGÉ : Utilisation de SupplierListSerializer au lieu de SupplierSimpleSerializer
     fournisseur_nom = serializers.CharField(
         source='fournisseur.company_name', read_only=True, default=None)
-    
+
     pourcentage_paye = serializers.SerializerMethodField()
     jours_retard = serializers.SerializerMethodField()
     created_by_email = serializers.EmailField(
@@ -452,15 +542,15 @@ class ReglementSerializer(serializers.ModelSerializer):
     mode_reglement_display = serializers.CharField(
         source='get_mode_reglement_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-    
+
     # ✅ CORRIGÉ : Utilisation de ClientSerializer
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default=None)
-    
+
     # ✅ CORRIGÉ : Utilisation de SupplierListSerializer
     fournisseur_nom = serializers.CharField(
         source='fournisseur.company_name', read_only=True, default=None)
-    
+
     facture_reference = serializers.CharField(
         source='facture.reference', read_only=True, default=None)
     created_by_email = serializers.EmailField(
@@ -683,7 +773,8 @@ class DashboardSerializer(serializers.Serializer):
     ca_total = serializers.DecimalField(max_digits=15, decimal_places=2)
     ca_evolution = serializers.DecimalField(max_digits=10, decimal_places=2)
     marge_brute = serializers.DecimalField(max_digits=15, decimal_places=2)
-    marge_pourcentage = serializers.DecimalField(max_digits=10, decimal_places=2)
+    marge_pourcentage = serializers.DecimalField(
+        max_digits=10, decimal_places=2)
     tresorerie = serializers.DecimalField(max_digits=15, decimal_places=2)
     ventes_mois = serializers.DecimalField(max_digits=15, decimal_places=2)
     achats_mois = serializers.DecimalField(max_digits=15, decimal_places=2)
@@ -722,5 +813,7 @@ class TresorerieSerializer(serializers.Serializer):
     encaissements = serializers.DecimalField(max_digits=15, decimal_places=2)
     decaissements = serializers.DecimalField(max_digits=15, decimal_places=2)
     solde_final = serializers.DecimalField(max_digits=15, decimal_places=2)
-    details_encaissements = serializers.ListField(child=serializers.DictField())
-    details_decaissements = serializers.ListField(child=serializers.DictField())
+    details_encaissements = serializers.ListField(
+        child=serializers.DictField())
+    details_decaissements = serializers.ListField(
+        child=serializers.DictField())
