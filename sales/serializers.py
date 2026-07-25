@@ -14,16 +14,20 @@ class ClientSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at', 'updated_at', 'created_by')
 
 
+# sales/serializers.py
+
 class VenteItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
         source='product.reference', read_only=True)
+    price_type_display = serializers.CharField(
+        source='get_price_type_display', read_only=True)  # NOUVEAU
 
     class Meta:
         model = VenteItem
         exclude = ('vente',)
         read_only_fields = ('id', 'total', 'stock_preleve',
-                            'product_name', 'product_reference')
+                            'product_name', 'product_reference', 'price_type_display')
 
 
 class VenteListSerializer(serializers.ModelSerializer):
@@ -102,7 +106,8 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             VenteItem.objects.create(vente=vente, **item_data)
 
         return vente
-    
+
+
 class DevisItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
@@ -190,6 +195,7 @@ class DevisCreateSerializer(serializers.ModelSerializer):
             DevisItem.objects.create(devis=devis, **item_data)
 
         return devis
+
 
 class PaiementSerializer(serializers.ModelSerializer):
     encaisse_par_nom = serializers.CharField(

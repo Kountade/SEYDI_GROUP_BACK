@@ -72,10 +72,6 @@ class ClientViewSet(viewsets.ModelViewSet):
 
 
 logger = logging.getLogger(__name__)
-# sales/views.py - VenteViewSet complet corrigé
-
-
-logger = logging.getLogger(__name__)
 
 
 class VenteViewSet(viewsets.ModelViewSet):
@@ -118,6 +114,46 @@ class VenteViewSet(viewsets.ModelViewSet):
         serializer = VenteListSerializer(
             queryset, many=True, context={'request': request})
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def product_prices(self, request):
+        """
+        Récupère les prix (détail et gros) d'un produit dans un entrepôt
+        URL: /ventes/product_prices/?product_id=xxx&warehouse_id=xxx
+        """
+        product_id = request.query_params.get('product_id')
+        warehouse_id = request.query_params.get('warehouse_id')
+
+        if not product_id or not warehouse_id:
+            return Response(
+                {'error': 'product_id et warehouse_id sont requis'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            from produits.models import ProductPricing
+            pricing = ProductPricing.objects.get(
+                product_id=product_id,
+                warehouse_id=warehouse_id,
+                is_current=True
+            )
+
+            return Response({
+                'sale_price': float(pricing.sale_price),
+                'wholesale_price': float(pricing.wholesale_price) if pricing.wholesale_price else None,
+                'purchase_price': float(pricing.purchase_price),
+                'has_wholesale': pricing.wholesale_price is not None and pricing.wholesale_price > 0
+            })
+        except ProductPricing.DoesNotExist:
+            return Response(
+                {'error': 'Aucun prix trouvé pour ce produit dans cet entrepôt'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['post'])
     @transaction.atomic
@@ -208,8 +244,8 @@ class VenteViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def approve(self, request, pk=None):
         """
-        Approuve une vente et réduit le stock de manière groupée.
-        La soustraction se fait UNIQUEMENT via le signal StockMovement.
+        Approuve une vente, réduit le stock de manière groupée 
+        et crée automatiquement la facture.
         """
         vente = self.get_object()
         user = request.user
@@ -307,13 +343,8 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 3. CRÉER LES MOUVEMENTS DE STOCK (LE SIGNAL VA GÉRER LA SOUSTRACTION)
-        # ⚠️ IMPORTANT: Ne PAS soustraire manuellement le stock ici !
+        # 3. CRÉER LES MOUVEMENTS DE STOCK
         for key, group in stock_verification.items():
-            # Créer un SEUL mouvement de stock pour le groupe
-            # Le signal post_save de StockMovement va automatiquement:
-            # - Soustraire du stock de l'entrepôt source
-            # - Mettre à jour le stock global du produit
             StockMovement.objects.create(
                 movement_type='out',
                 reference_type='sale',
@@ -339,11 +370,70 @@ class VenteViewSet(viewsets.ModelViewSet):
         vente.date_approbation = timezone.now()
         vente.save()
 
-        return Response({
+        # ============================================================
+        # 🆕 5. CRÉATION AUTOMATIQUE DE LA FACTURE
+        # ============================================================
+        facture_creee = False
+        facture_reference = None
+
+        # Vérifier si une facture existe déjà
+        if not Facture.objects.filter(vente=vente).exists():
+            try:
+                # Vérifier que la vente a un client
+                if not vente.client:
+                    logger.warning(
+                        f"⚠️ La vente {vente.reference} n'a pas de client, facture créée sans client")
+
+                # Calculer la date d'échéance (30 jours par défaut)
+                date_echeance = timezone.now().date() + timezone.timedelta(days=30)
+
+                # Créer la facture
+                facture = Facture.objects.create(
+                    vente=vente,
+                    client=vente.client,  # Peut être None
+                    agence=vente.agence,
+                    cree_par=user,
+                    type_facture='finale',
+                    date_facture=timezone.now().date(),
+                    date_echeance=date_echeance,
+                    conditions_paiement='Paiement à 30 jours',
+                    notes=f"Facture générée automatiquement à l'approbation de la vente {vente.reference}",
+                    sous_total=vente.sous_total,
+                    tva=vente.tva,
+                    total_ttc=vente.total,
+                    montant_paye=vente.montant_paye,
+                    montant_restant=vente.total - vente.montant_paye
+                )
+
+                facture_creee = True
+                facture_reference = facture.reference
+
+                logger.info(
+                    f"✅ Facture {facture.reference} créée automatiquement pour la vente {vente.reference}")
+
+            except Exception as e:
+                logger.error(
+                    f"❌ Erreur lors de la création automatique de la facture: {str(e)}")
+                # La vente est déjà approuvée, on continue
+        else:
+            facture_existante = Facture.objects.filter(vente=vente).first()
+            facture_creee = True
+            facture_reference = facture_existante.reference
+            logger.info(
+                f"ℹ️ Une facture existe déjà pour la vente {vente.reference}")
+
+        # Préparer la réponse
+        response_data = {
             'success': True,
             'message': 'Vente approuvée avec succès',
-            'data': VenteDetailSerializer(vente).data
-        })
+            'data': VenteDetailSerializer(vente).data,
+            'facture': {
+                'creee': facture_creee,
+                'reference': facture_reference
+            }
+        }
+
+        return Response(response_data)
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
@@ -438,12 +528,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             stock_restauration[key]['total_quantity'] += item.quantity
             stock_restauration[key]['items'].append(item)
 
-        # 2. Restaurer le stock via des mouvements (LE SIGNAL VA GÉRER LA RESTAURATION)
-        # ⚠️ IMPORTANT: Ne PAS ajouter manuellement le stock ici !
+        # 2. Restaurer le stock via des mouvements
         for key, group in stock_restauration.items():
             if group['warehouse']:
-                # Créer un seul mouvement d'entrée pour le groupe
-                # Le signal post_save va automatiquement ajouter au stock
                 StockMovement.objects.create(
                     movement_type='in',
                     reference_type='sale',
@@ -457,7 +544,16 @@ class VenteViewSet(viewsets.ModelViewSet):
                     created_by=request.user
                 )
 
-        # 3. Mettre à jour le statut de la vente
+        # 3. Supprimer la facture associée si elle existe
+        if Facture.objects.filter(vente=vente).exists():
+            facture = Facture.objects.filter(vente=vente).first()
+            facture.status = 'cancelled'
+            facture.notes = f"{facture.notes or ''}\n\nAnnulée suite à l'annulation de la vente {vente.reference}"
+            facture.save()
+            logger.info(
+                f"📄 Facture {facture.reference} annulée suite à l'annulation de la vente {vente.reference}")
+
+        # 4. Mettre à jour le statut de la vente
         vente.status = 'cancelled'
         vente.save()
 

@@ -125,7 +125,14 @@ class Vente(models.Model):
         return self.total - self.montant_paye
 
 
+# sales/models.py - Ajoutez ce champ dans VenteItem
+
 class VenteItem(models.Model):
+    PRICE_TYPE_CHOICES = (
+        ('retail', 'Prix de détail'),
+        ('wholesale', 'Prix de gros'),
+    )
+    
     vente = models.ForeignKey(
         Vente, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
@@ -135,6 +142,11 @@ class VenteItem(models.Model):
     quantity = models.IntegerField(validators=[MinValueValidator(1)])
     prix_unitaire = models.DecimalField(
         max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    price_type = models.CharField(
+        max_length=20, 
+        choices=PRICE_TYPE_CHOICES, 
+        default='retail'
+    )  # NOUVEAU : type de prix utilisé
     remise = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     tva = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -150,10 +162,8 @@ class VenteItem(models.Model):
         return f"{self.product.name} x {self.quantity}"
 
     def save(self, *args, **kwargs):
-        self.total = (self.prix_unitaire * self.quantity) - \
-            self.remise + self.tva
+        self.total = (self.prix_unitaire * self.quantity) - self.remise + self.tva
         super().save(*args, **kwargs)
-
 
 class Devis(models.Model):
     """Devis (proforma / estimation) avant transformation en vente"""
