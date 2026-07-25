@@ -1,6 +1,8 @@
+# tresorerie/views.py
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from django.db.models import Q, Sum, Count
 from django.utils import timezone
 from datetime import timedelta
@@ -8,6 +10,102 @@ from .models import *
 from .serializers import *
 from .permissions import *
 from users.permissions import IsPDG, IsDRH, IsPDGOrDRH, IsChefAgence, IsComptable
+
+
+# ============================================================
+# TRÉSORERIE GLOBALE (API View pour le dashboard)
+# ============================================================
+
+class TresorerieGlobalView(APIView):
+    """Vue pour le solde global de trésorerie"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        agence_id = request.query_params.get('agence_id')
+
+        # Filtrer par agence si spécifié
+        caisses_qs = Caisse.objects.filter(is_active=True)
+        comptes_qs = CompteBancaire.objects.filter(is_active=True)
+
+        if agence_id:
+            caisses_qs = caisses_qs.filter(agence_id=agence_id)
+            comptes_qs = comptes_qs.filter(agence_id=agence_id)
+
+        # Calculer les soldes
+        solde_caisses = caisses_qs.aggregate(
+            total=Sum('solde_actuel'))['total'] or 0
+        solde_banques = comptes_qs.aggregate(
+            total=Sum('solde_actuel'))['total'] or 0
+        solde_global = solde_caisses + solde_banques
+
+        data = {
+            'solde_global': solde_global,
+            'solde_caisses': solde_caisses,
+            'solde_banques': solde_banques,
+            'nb_caisses': caisses_qs.count(),
+            'nb_comptes': comptes_qs.count()
+        }
+
+        serializer = TresorerieGlobalSerializer(data)
+        return Response(serializer.data)
+
+
+# ============================================================
+# ALERTES TRÉSORERIE (API View)
+# ============================================================
+
+class AlertesTresorerieView(APIView):
+    """Vue pour les alertes de trésorerie"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        agence_id = request.query_params.get('agence_id')
+
+        alertes = []
+
+        # Filtrer les caisses par agence
+        caisses_qs = Caisse.objects.filter(is_active=True)
+        if agence_id:
+            caisses_qs = caisses_qs.filter(agence_id=agence_id)
+
+        # Vérifier les caisses sous seuil
+        for caisse in caisses_qs:
+            if caisse.est_sous_seuil_min:
+                alertes.append({
+                    'id': f'caisse_{caisse.id}',
+                    'type': 'warning',
+                    'message': f'Caisse {caisse.nom} sous le seuil minimum ({caisse.solde_actuel} < {caisse.seuil_min})',
+                    'est_active': True,
+                    'caisse_id': caisse.id,
+                    'caisse_nom': caisse.nom
+                })
+            if caisse.est_sur_seuil_max:
+                alertes.append({
+                    'id': f'caisse_max_{caisse.id}',
+                    'type': 'info',
+                    'message': f'Caisse {caisse.nom} dépasse le seuil maximum ({caisse.solde_actuel} > {caisse.seuil_max})',
+                    'est_active': True,
+                    'caisse_id': caisse.id,
+                    'caisse_nom': caisse.nom
+                })
+
+        # Vérifier les comptes bancaires avec solde bas
+        comptes_qs = CompteBancaire.objects.filter(is_active=True)
+        if agence_id:
+            comptes_qs = comptes_qs.filter(agence_id=agence_id)
+
+        for compte in comptes_qs:
+            if compte.solde_actuel < 0:
+                alertes.append({
+                    'id': f'compte_{compte.id}',
+                    'type': 'error',
+                    'message': f'Compte {compte.nom} en négatif ({compte.solde_actuel})',
+                    'est_active': True,
+                    'compte_id': compte.id,
+                    'compte_nom': compte.nom
+                })
+
+        return Response(alertes)
 
 
 # ============================================================
@@ -53,8 +151,9 @@ class CompteBancaireViewset(viewsets.ModelViewSet):
     search_fields = ['banque', 'nom', 'numero_compte', 'code']
     ordering_fields = ['banque', 'nom', 'solde_actuel']
 
+    # ✅ CORRIGÉ: get_serializer_class avec tous les serializers
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action in ['create', 'update', 'partial_update']:
             return CompteBancaireCreateSerializer
         return CompteBancaireSerializer
 
@@ -86,7 +185,7 @@ class MouvementTresorerieViewset(viewsets.ModelViewSet):
     ordering_fields = ['date_mouvement', 'montant', 'created_at']
 
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action in ['create', 'update', 'partial_update']:
             return MouvementTresorerieCreateSerializer
         return MouvementTresorerieSerializer
 
@@ -171,7 +270,7 @@ class FraisViewset(viewsets.ModelViewSet):
     ordering_fields = ['date_frais', 'montant', 'created_at']
 
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action in ['create', 'update', 'partial_update']:
             return FraisCreateSerializer
         return FraisSerializer
 
@@ -233,7 +332,7 @@ class PrevisionTresorerieViewset(viewsets.ModelViewSet):
     ordering_fields = ['date_debut', 'montant_prevu', 'created_at']
 
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action in ['create', 'update', 'partial_update']:
             return PrevisionTresorerieCreateSerializer
         return PrevisionTresorerieSerializer
 
@@ -269,7 +368,7 @@ class RapprochementBancaireViewset(viewsets.ModelViewSet):
     ordering_fields = ['date_debut', 'created_at']
 
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action in ['create', 'update', 'partial_update']:
             return RapprochementBancaireCreateSerializer
         return RapprochementBancaireSerializer
 

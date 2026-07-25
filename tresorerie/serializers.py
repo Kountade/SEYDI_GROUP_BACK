@@ -1,3 +1,4 @@
+# tresorerie/serializers.py
 from rest_framework import serializers
 from django.db.models import Sum
 from django.utils import timezone
@@ -59,6 +60,8 @@ class CompteBancaireSerializer(serializers.ModelSerializer):
     type_compte_display = serializers.CharField(
         source='get_type_compte_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
+    created_by_email = serializers.EmailField(
+        source='created_by.email', read_only=True, default=None)
 
     class Meta:
         model = CompteBancaire
@@ -69,9 +72,35 @@ class CompteBancaireSerializer(serializers.ModelSerializer):
             'devise', 'solde_initial', 'solde_actuel',
             'is_active', 'is_default',
             'date_ouverture', 'description',
+            'created_by', 'created_by_email',
             'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
+
+
+# ✅ AJOUT: CompteBancaireCreateSerializer (manquant)
+class CompteBancaireCreateSerializer(serializers.ModelSerializer):
+    """Serializer pour la création d'un compte bancaire"""
+
+    class Meta:
+        model = CompteBancaire
+        fields = (
+            'banque', 'code', 'nom', 'type_compte', 'agence',
+            'numero_compte', 'iban', 'bic',
+            'devise', 'solde_initial',
+            'is_active', 'is_default',
+            'date_ouverture', 'description'
+        )
+
+    def validate(self, data):
+        if CompteBancaire.objects.filter(
+            agence=data['agence'],
+            numero_compte=data['numero_compte']
+        ).exists():
+            raise serializers.ValidationError({
+                'numero_compte': 'Ce numéro de compte existe déjà pour cette agence'
+            })
+        return data
 
 
 # ============================================================
@@ -182,6 +211,24 @@ class FraisSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
 
+# ✅ AJOUT: FraisCreateSerializer (manquant)
+class FraisCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Frais
+        fields = (
+            'titre', 'agence', 'categorie', 'montant',
+            'date_frais', 'date_paiement', 'beneficiaire',
+            'piece_justificative', 'mode_paiement', 'status', 'notes'
+        )
+
+    def validate(self, data):
+        if data.get('montant', 0) <= 0:
+            raise serializers.ValidationError({
+                'montant': 'Le montant doit être supérieur à 0'
+            })
+        return data
+
+
 # ============================================================
 # PRÉVISIONS SERIALIZERS
 # ============================================================
@@ -215,6 +262,26 @@ class PrevisionTresorerieSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
 
+# ✅ AJOUT: PrevisionTresorerieCreateSerializer (manquant)
+class PrevisionTresorerieCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PrevisionTresorerie
+        fields = (
+            'titre', 'agence', 'type_prevision', 'periode',
+            'montant_prevu', 'date_debut', 'date_fin',
+            'source_type', 'source_id', 'categorie', 'sous_categorie',
+            'statut', 'probabilite', 'notes'
+        )
+
+    def validate(self, data):
+        if data.get('date_debut') and data.get('date_fin'):
+            if data['date_debut'] > data['date_fin']:
+                raise serializers.ValidationError({
+                    'date_debut': 'La date début doit être antérieure à la date fin'
+                })
+        return data
+
+
 # ============================================================
 # RAPPROCHEMENT SERIALIZERS
 # ============================================================
@@ -245,6 +312,29 @@ class RapprochementBancaireSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
 
+# ✅ AJOUT: RapprochementBancaireCreateSerializer (manquant)
+class RapprochementBancaireCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RapprochementBancaire
+        fields = (
+            'agence', 'compte_bancaire',
+            'date_debut', 'date_fin',
+            'solde_comptable', 'solde_bancaire',
+            'status',
+            'encours_emission', 'encours_encaissement',
+            'commissions', 'autres_ecarts',
+            'notes'
+        )
+
+    def validate(self, data):
+        if data.get('date_debut') and data.get('date_fin'):
+            if data['date_debut'] > data['date_fin']:
+                raise serializers.ValidationError({
+                    'date_debut': 'La date début doit être antérieure à la date fin'
+                })
+        return data
+
+
 # ============================================================
 # TRÉSORERIE JOURNALIÈRE SERIALIZER
 # ============================================================
@@ -267,3 +357,16 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
+
+
+# ============================================================
+# TRÉSORERIE GLOBAL SERIALIZER
+# ============================================================
+
+class TresorerieGlobalSerializer(serializers.Serializer):
+    """Serializer pour le solde global de trésorerie"""
+    solde_global = serializers.DecimalField(max_digits=15, decimal_places=2)
+    solde_caisses = serializers.DecimalField(max_digits=15, decimal_places=2)
+    solde_banques = serializers.DecimalField(max_digits=15, decimal_places=2)
+    nb_caisses = serializers.IntegerField()
+    nb_comptes = serializers.IntegerField()
