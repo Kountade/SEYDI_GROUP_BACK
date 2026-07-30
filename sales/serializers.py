@@ -1,4 +1,3 @@
-# sales/serializers.py
 from rest_framework import serializers
 from django.db.models import Sum
 from decimal import Decimal
@@ -14,14 +13,12 @@ class ClientSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at', 'updated_at', 'created_by')
 
 
-# sales/serializers.py
-
 class VenteItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
         source='product.reference', read_only=True)
     price_type_display = serializers.CharField(
-        source='get_price_type_display', read_only=True)  # NOUVEAU
+        source='get_price_type_display', read_only=True)
 
     class Meta:
         model = VenteItem
@@ -42,8 +39,8 @@ class VenteListSerializer(serializers.ModelSerializer):
         model = Vente
         fields = ('id', 'reference', 'type_vente', 'agence_nom', 'client_nom',
                   'vendeur_nom', 'status', 'status_display', 'date_vente',
-                  'sous_total', 'remise', 'tva', 'total', 'montant_paye',
-                  'montant_du', 'est_paye')
+                  'sous_total', 'remise', 'total', 'montant_paye',
+                  'montant_du', 'est_paye')  # tva supprimé
 
 
 class VenteDetailSerializer(serializers.ModelSerializer):
@@ -57,7 +54,7 @@ class VenteDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Vente
-        fields = '__all__'
+        fields = '__all__'  # Le modèle n'a plus de champ tva
 
 
 class VenteCreateSerializer(serializers.ModelSerializer):
@@ -68,8 +65,8 @@ class VenteCreateSerializer(serializers.ModelSerializer):
         model = Vente
         fields = ('type_vente', 'agence', 'client_id', 'notes', 'items')
         read_only_fields = ('id', 'reference', 'status', 'vendeur', 'date_vente',
-                            'sous_total', 'remise', 'tva', 'total', 'montant_paye',
-                            'montant_du', 'est_paye')
+                            'sous_total', 'remise', 'total', 'montant_paye',
+                            'montant_du', 'est_paye')  # tva supprimé
 
     def validate(self, data):
         items_data = data.get('items', [])
@@ -89,15 +86,14 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             qte = Decimal(str(item.get('quantity', 0)))
             sous_total += prix * qte
 
-        tva = sous_total * Decimal('0.18')
-        total = sous_total + tva
+        # TVA SUPPRIMÉE - total = sous_total
+        total = sous_total
 
         vente = Vente.objects.create(
             **validated_data,
             client_id=client_id,
             vendeur=user,
             sous_total=sous_total,
-            tva=tva,
             total=total,
             montant_du=total
         )
@@ -132,7 +128,7 @@ class DevisListSerializer(serializers.ModelSerializer):
         model = Devis
         fields = ('id', 'reference', 'client_nom', 'agence_nom', 'vendeur_nom', 'status',
                   'status_display', 'date_creation', 'date_expiration', 'sous_total',
-                  'remise', 'total')  # tva supprimé
+                  'remise', 'total')  # Pas de TVA
 
 
 class DevisDetailSerializer(serializers.ModelSerializer):
@@ -145,7 +141,7 @@ class DevisDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Devis
-        fields = '__all__'  # Le modèle n'a plus de champ tva, donc correct
+        fields = '__all__'  # Pas de TVA
 
 
 class DevisCreateSerializer(serializers.ModelSerializer):
@@ -180,8 +176,7 @@ class DevisCreateSerializer(serializers.ModelSerializer):
             qte = Decimal(str(item.get('quantity', 0)))
             sous_total += prix * qte
 
-        # Pas de TVA, le total = sous_total (la remise sera déduite par le modèle)
-        total = sous_total
+        total = sous_total  # Pas de TVA
 
         devis = Devis.objects.create(
             **validated_data,
@@ -201,7 +196,6 @@ class PaiementSerializer(serializers.ModelSerializer):
     encaisse_par_nom = serializers.CharField(
         source='encaisse_par.email', read_only=True)
 
-    # Informations de la facture
     facture_ref = serializers.CharField(
         source='facture.reference', read_only=True, default='-')
     facture_date = serializers.DateField(
@@ -211,7 +205,6 @@ class PaiementSerializer(serializers.ModelSerializer):
     facture_restant = serializers.DecimalField(
         source='facture.montant_restant', max_digits=12, decimal_places=2, read_only=True, default=0)
 
-    # Informations du client de la facture
     facture_client_nom = serializers.CharField(
         source='facture.client.nom', read_only=True, default='Anonyme')
     facture_client_prenom = serializers.CharField(
@@ -225,7 +218,6 @@ class PaiementSerializer(serializers.ModelSerializer):
     facture_client_raison_sociale = serializers.CharField(
         source='facture.client.raison_sociale', read_only=True, default='')
 
-    # Informations du client direct (si aucun client de facture)
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default='Anonyme')
     client_prenom = serializers.CharField(
@@ -256,7 +248,6 @@ class PaiementCreateSerializer(serializers.ModelSerializer):
         if not facture:
             raise serializers.ValidationError(
                 {"facture": "La facture est obligatoire."})
-        # ✅ On n'exige plus que la facture ait un client
         if data['montant'] > facture.montant_restant:
             raise serializers.ValidationError({
                 "montant": f"Le montant ({data['montant']}) dépasse le restant dû ({facture.montant_restant} FCFA)."
@@ -298,10 +289,9 @@ class FactureDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Facture
-        fields = '__all__'
+        fields = '__all__'  # Pas de champ tva
 
     def get_items(self, obj):
-        """Retourne les items de la vente associée à la facture"""
         if obj.vente:
             return VenteItemSerializer(obj.vente.items.all(), many=True).data
         return []
@@ -313,8 +303,8 @@ class FactureCreateSerializer(serializers.ModelSerializer):
         fields = ('vente', 'type_facture', 'date_echeance',
                   'conditions_paiement', 'notes', 'pied_de_page')
         read_only_fields = ('id', 'reference', 'status', 'date_facture', 'cree_par',
-                            'sous_total', 'tva', 'total_ttc', 'montant_paye', 'montant_restant',
-                            'client', 'agence', 'currency')
+                            'sous_total', 'total_ttc', 'montant_paye', 'montant_restant',
+                            'client', 'agence', 'currency')  # tva supprimé
 
     def validate(self, data):
         vente = data.get('vente')
@@ -345,7 +335,7 @@ class FactureCreateSerializer(serializers.ModelSerializer):
             notes=validated_data.get('notes', ''),
             pied_de_page=validated_data.get('pied_de_page', ''),
             sous_total=vente.sous_total,
-            tva=vente.tva,
+            # tva supprimé - pas de champ tva
             total_ttc=vente.total,
             montant_restant=vente.total,
             montant_paye=vente.montant_paye

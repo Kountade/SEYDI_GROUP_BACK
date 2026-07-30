@@ -1,4 +1,3 @@
-# sales/views.py
 from django.shortcuts import render
 from rest_framework import viewsets, generics, status, filters
 from rest_framework.decorators import action
@@ -68,15 +67,12 @@ class ClientViewSet(viewsets.ModelViewSet):
             )
 
 
-# sales/views.py
-
-
 logger = logging.getLogger(__name__)
 
 
 class VenteViewSet(viewsets.ModelViewSet):
     """
-    ViewSet pour la gestion des ventes
+    ViewSet pour la gestion des ventes - SANS TVA
     """
     permission_classes = [IsAuthenticated, HasAgenceAccess]
     filter_backends = [DjangoFilterBackend,
@@ -119,7 +115,6 @@ class VenteViewSet(viewsets.ModelViewSet):
     def product_prices(self, request):
         """
         Récupère les prix (détail et gros) d'un produit dans un entrepôt
-        URL: /ventes/product_prices/?product_id=xxx&warehouse_id=xxx
         """
         product_id = request.query_params.get('product_id')
         warehouse_id = request.query_params.get('warehouse_id')
@@ -160,18 +155,16 @@ class VenteViewSet(viewsets.ModelViewSet):
     def submit(self, request, pk=None):
         """
         Soumet une vente pour approbation.
-        Vérifie le stock mais NE LE SOUSTRAIT PAS (seulement vérification).
+        Vérifie le stock mais NE LE SOUSTRAIT PAS.
         """
         vente = self.get_object()
 
-        # Vérification du statut
         if vente.status != 'draft':
             return Response(
                 {'error': f'Seule une vente en brouillon peut être soumise. Statut actuel: {vente.status}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Récupération de l'entrepôt
         warehouse = vente.agence.warehouses.filter(is_default=True).first()
         if not warehouse:
             warehouse = vente.agence.warehouses.filter(is_active=True).first()
@@ -184,11 +177,9 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # === VÉRIFICATION DU STOCK (AGRÉGATION DES QUANTITÉS) ===
         stock_insuffisant = []
         stock_verification = {}
 
-        # 1. Grouper les items par produit et variante
         for item in vente.items.all():
             key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
 
@@ -200,7 +191,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 }
             stock_verification[key]['total_quantity'] += item.quantity
 
-        # 2. Vérifier le stock pour chaque groupe (NE PAS SOUSTRAIRE)
         for key, group in stock_verification.items():
             stock = WarehouseStock.objects.filter(
                 product=group['product'],
@@ -230,7 +220,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 3. Mettre à jour le statut (NE PAS SOUSTRAIRE LE STOCK ICI)
         vente.status = 'pending_approval'
         vente.save()
 
@@ -244,13 +233,11 @@ class VenteViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def approve(self, request, pk=None):
         """
-        Approuve une vente, réduit le stock de manière groupée 
-        et crée automatiquement la facture.
+        Approuve une vente, réduit le stock et crée la facture - SANS TVA
         """
         vente = self.get_object()
         user = request.user
 
-        # Vérification des permissions
         if not (user.est_chef_agence() or user.est_pdg()):
             return Response(
                 {'error': 'Seul le chef d\'agence ou le PDG peut approuver une vente'},
@@ -263,14 +250,12 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Vérification du statut
         if vente.status != 'pending_approval':
             return Response(
                 {'error': f'Seule une vente en attente peut être approuvée. Statut actuel: {vente.status}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Récupération de l'entrepôt
         warehouse = vente.agence.warehouses.filter(is_default=True).first()
         if not warehouse:
             warehouse = vente.agence.warehouses.filter(is_active=True).first()
@@ -283,10 +268,8 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # === GROUPEMENT DES ITEMS PAR PRODUIT/VARIANTE ===
         stock_verification = {}
 
-        # 1. Agrégation des quantités par produit et variante
         for item in vente.items.all():
             key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
 
@@ -301,7 +284,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             stock_verification[key]['total_quantity'] += item.quantity
             stock_verification[key]['items'].append(item)
 
-        # Journalisation pour débogage
         logger.info(f"=== VENTE {vente.reference} - AGRÉGATION DU STOCK ===")
         for key, group in stock_verification.items():
             logger.info(
@@ -311,7 +293,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 f"Nombre de lignes: {len(group['items'])}"
             )
 
-        # 2. Vérification du stock pour chaque groupe
         stock_insuffisant = []
         for key, group in stock_verification.items():
             try:
@@ -343,7 +324,7 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 3. CRÉER LES MOUVEMENTS DE STOCK
+        # Créer les mouvements de stock
         for key, group in stock_verification.items():
             StockMovement.objects.create(
                 movement_type='out',
@@ -358,39 +339,27 @@ class VenteViewSet(viewsets.ModelViewSet):
                 created_by=user
             )
 
-            # Marquer tous les items du groupe comme prélevés
             for item in group['items']:
                 item.stock_preleve = True
                 item.warehouse_source = warehouse
                 item.save()
 
-        # 4. Mettre à jour le statut de la vente
         vente.status = 'approved'
         vente.approved_by = user
         vente.date_approbation = timezone.now()
         vente.save()
 
-        # ============================================================
-        # 🆕 5. CRÉATION AUTOMATIQUE DE LA FACTURE
-        # ============================================================
+        # Création automatique de la facture - SANS TVA
         facture_creee = False
         facture_reference = None
 
-        # Vérifier si une facture existe déjà
         if not Facture.objects.filter(vente=vente).exists():
             try:
-                # Vérifier que la vente a un client
-                if not vente.client:
-                    logger.warning(
-                        f"⚠️ La vente {vente.reference} n'a pas de client, facture créée sans client")
-
-                # Calculer la date d'échéance (30 jours par défaut)
                 date_echeance = timezone.now().date() + timezone.timedelta(days=30)
 
-                # Créer la facture
                 facture = Facture.objects.create(
                     vente=vente,
-                    client=vente.client,  # Peut être None
+                    client=vente.client,
                     agence=vente.agence,
                     cree_par=user,
                     type_facture='finale',
@@ -399,7 +368,7 @@ class VenteViewSet(viewsets.ModelViewSet):
                     conditions_paiement='Paiement à 30 jours',
                     notes=f"Facture générée automatiquement à l'approbation de la vente {vente.reference}",
                     sous_total=vente.sous_total,
-                    tva=vente.tva,
+                    # Pas de TVA - total_ttc = total
                     total_ttc=vente.total,
                     montant_paye=vente.montant_paye,
                     montant_restant=vente.total - vente.montant_paye
@@ -414,7 +383,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 logger.error(
                     f"❌ Erreur lors de la création automatique de la facture: {str(e)}")
-                # La vente est déjà approuvée, on continue
         else:
             facture_existante = Facture.objects.filter(vente=vente).first()
             facture_creee = True
@@ -422,7 +390,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             logger.info(
                 f"ℹ️ Une facture existe déjà pour la vente {vente.reference}")
 
-        # Préparer la réponse
         response_data = {
             'success': True,
             'message': 'Vente approuvée avec succès',
@@ -468,7 +435,7 @@ class VenteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
         """
-        Complète une vente approuvée (marque comme terminée).
+        Complète une vente approuvée.
         """
         vente = self.get_object()
 
@@ -498,8 +465,7 @@ class VenteViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def cancel(self, request, pk=None):
         """
-        Annule une vente et restaure le stock de manière groupée.
-        La restauration se fait UNIQUEMENT via le signal StockMovement.
+        Annule une vente et restaure le stock.
         """
         vente = self.get_object()
 
@@ -509,10 +475,8 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # === GROUPEMENT DES ITEMS POUR L'ANNULATION ===
         stock_restauration = {}
 
-        # 1. Agrégation des quantités par produit/variante pour les items prélevés
         for item in vente.items.filter(stock_preleve=True):
             key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
 
@@ -528,7 +492,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             stock_restauration[key]['total_quantity'] += item.quantity
             stock_restauration[key]['items'].append(item)
 
-        # 2. Restaurer le stock via des mouvements
         for key, group in stock_restauration.items():
             if group['warehouse']:
                 StockMovement.objects.create(
@@ -544,7 +507,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                     created_by=request.user
                 )
 
-        # 3. Supprimer la facture associée si elle existe
         if Facture.objects.filter(vente=vente).exists():
             facture = Facture.objects.filter(vente=vente).first()
             facture.status = 'cancelled'
@@ -553,7 +515,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             logger.info(
                 f"📄 Facture {facture.reference} annulée suite à l'annulation de la vente {vente.reference}")
 
-        # 4. Mettre à jour le statut de la vente
         vente.status = 'cancelled'
         vente.save()
 
@@ -566,7 +527,7 @@ class VenteViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def stats(self, request):
         """
-        Statistiques des ventes.
+        Statistiques des ventes - SANS TVA
         """
         user = request.user
 
@@ -793,7 +754,7 @@ class DevisViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def pdf(self, request, pk=None):
-        """Génère un PDF du devis (sans TVA)"""
+        """Génère un PDF du devis - SANS TVA"""
         devis = self.get_object()
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm,
@@ -890,7 +851,7 @@ class DevisViewSet(viewsets.ModelViewSet):
                                                               fontSize=14, textColor=colors.HexColor('#1e40af'))))
             elements.append(Paragraph(devis.notes, styles['Normal']))
 
-        footer_text = f'<para align="center" fontSize="8" textColor="gray">Devis valable jusqu’au {devis.date_expiration.strftime("%d/%m/%Y")}.<br/>SEYDI GROUP SARL - RCCM: SN DKR 2023 B 123 - Généré le {timezone.now().strftime("%d/%m/%Y à %H:%M")}</para>'
+        footer_text = f'<para align="center" fontSize="8" textColor="gray">Devis valable jusqu\'au {devis.date_expiration.strftime("%d/%m/%Y")}.<br/>SEYDI GROUP SARL - RCCM: SN DKR 2023 B 123 - Généré le {timezone.now().strftime("%d/%m/%Y à %H:%M")}</para>'
         elements.append(Paragraph(footer_text, styles['Normal']))
 
         doc.build(elements)
@@ -1043,6 +1004,7 @@ class FactureViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def pdf(self, request, pk=None):
+        """Génère un PDF de la facture - SANS TVA"""
         facture = self.get_object()
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm,
@@ -1112,7 +1074,7 @@ class FactureViewSet(viewsets.ModelViewSet):
                                                              fontSize=14, textColor=colors.HexColor('#1e40af'), spaceAfter=0.3*cm)))
         vente_items = facture.vente.items.all() if facture.vente else []
         table_data = [['Désignation', 'Référence',
-                       'Qté', 'Prix HT', 'Total TTC']]
+                       'Qté', 'Prix unitaire', 'Total']]
         for item in vente_items:
             table_data.append([item.product.name[:50], item.product.reference[:20], str(item.quantity),
                                f"{item.prix_unitaire:,.0f} FCFA", f"{item.total:,.0f} FCFA"])
@@ -1135,9 +1097,9 @@ class FactureViewSet(viewsets.ModelViewSet):
         elements.append(table)
         elements.append(Spacer(1, 0.5*cm))
 
+        # Totaux - SANS TVA
         totals_data = [
             ['Sous-total HT:', f"{facture.sous_total:,.0f} FCFA"],
-            ['TVA (18%):', f"{facture.tva:,.0f} FCFA"],
             ['TOTAL TTC:', f"{facture.total_ttc:,.0f} FCFA"],
             ['Montant payé:', f"{facture.montant_paye:,.0f} FCFA"],
             ['Reste à payer:', f"{facture.montant_restant:,.0f} FCFA"],
@@ -1147,11 +1109,11 @@ class FactureViewSet(viewsets.ModelViewSet):
             ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
             ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
             ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 2), (1, 2), 12),
-            ('FONTNAME', (0, 2), (1, 2), 'Helvetica-Bold'),
-            ('TEXTCOLOR', (1, 4), (1, 4), colors.red),
-            ('FONTNAME', (1, 4), (1, 4), 'Helvetica-Bold'),
-            ('LINEABOVE', (0, 2), (-1, 2), 0.5, colors.grey),
+            ('FONTSIZE', (0, 1), (1, 1), 12),
+            ('FONTNAME', (0, 1), (1, 1), 'Helvetica-Bold'),
+            ('TEXTCOLOR', (1, 3), (1, 3), colors.red),
+            ('FONTNAME', (1, 3), (1, 3), 'Helvetica-Bold'),
+            ('LINEABOVE', (0, 1), (-1, 1), 0.5, colors.grey),
             ('LINEBELOW', (0, -1), (-1, -1), 0.5, colors.grey),
         ]))
         elements.append(totals_table)

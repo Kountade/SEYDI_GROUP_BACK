@@ -1,4 +1,3 @@
-# sales/models.py
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.utils import timezone
@@ -44,7 +43,7 @@ class Client(models.Model):
 
 
 class Vente(models.Model):
-    """Vente principale"""
+    """Vente principale - SANS TVA"""
     STATUS_CHOICES = (
         ('draft', 'Brouillon'),
         ('pending_approval', 'En attente d\'approbation'),
@@ -81,7 +80,7 @@ class Vente(models.Model):
     remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     remise_percentage = models.DecimalField(
         max_digits=5, decimal_places=2, default=0)
-    tva = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # CHAMP TVA SUPPRIMÉ
     total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     montant_paye = models.DecimalField(
@@ -125,14 +124,13 @@ class Vente(models.Model):
         return self.total - self.montant_paye
 
 
-# sales/models.py - Ajoutez ce champ dans VenteItem
-
 class VenteItem(models.Model):
+    """Ligne de vente avec type de prix"""
     PRICE_TYPE_CHOICES = (
         ('retail', 'Prix de détail'),
         ('wholesale', 'Prix de gros'),
     )
-    
+
     vente = models.ForeignKey(
         Vente, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
@@ -143,12 +141,12 @@ class VenteItem(models.Model):
     prix_unitaire = models.DecimalField(
         max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     price_type = models.CharField(
-        max_length=20, 
-        choices=PRICE_TYPE_CHOICES, 
+        max_length=20,
+        choices=PRICE_TYPE_CHOICES,
         default='retail'
-    )  # NOUVEAU : type de prix utilisé
+    )
     remise = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    tva = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # TVA SUPPRIMÉE
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     stock_preleve = models.BooleanField(default=False)
@@ -162,11 +160,13 @@ class VenteItem(models.Model):
         return f"{self.product.name} x {self.quantity}"
 
     def save(self, *args, **kwargs):
-        self.total = (self.prix_unitaire * self.quantity) - self.remise + self.tva
+        # Calcul du total sans TVA
+        self.total = (self.prix_unitaire * self.quantity) - self.remise
         super().save(*args, **kwargs)
 
+
 class Devis(models.Model):
-    """Devis (proforma / estimation) avant transformation en vente"""
+    """Devis (proforma / estimation) avant transformation en vente - SANS TVA"""
     STATUS_CHOICES = (
         ('draft', 'Brouillon'),
         ('sent', 'Envoyé'),
@@ -188,7 +188,7 @@ class Devis(models.Model):
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default='draft')
     date_creation = models.DateTimeField(default=timezone.now)
-    date_expiration = models.DateField()  # Date de validité du devis
+    date_expiration = models.DateField()
 
     sous_total = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
@@ -227,7 +227,6 @@ class Devis(models.Model):
                 self.reference = f"{prefix}{str(last_num + 1).zfill(4)}"
             else:
                 self.reference = f"{prefix}0001"
-        # Calcul du total = sous_total - remise (sans TVA)
         self.total = self.sous_total - self.remise
         super().save(*args, **kwargs)
 
@@ -243,7 +242,7 @@ class Devis(models.Model):
 
 
 class DevisItem(models.Model):
-    """Ligne d'un devis"""
+    """Ligne d'un devis - SANS TVA"""
     devis = models.ForeignKey(
         Devis, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
@@ -263,13 +262,12 @@ class DevisItem(models.Model):
         return f"{self.product.name} x {self.quantity}"
 
     def save(self, *args, **kwargs):
-        # Calcul du total sans TVA
         self.total = (self.prix_unitaire * self.quantity) - self.remise
         super().save(*args, **kwargs)
 
 
 class Facture(models.Model):
-    """Facture générée à partir d'une vente"""
+    """Facture générée à partir d'une vente - SANS TVA"""
     STATUS_CHOICES = (
         ('draft', 'Brouillon'),
         ('sent', 'Envoyée'),
@@ -303,7 +301,7 @@ class Facture(models.Model):
     sous_total = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
     remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    tva = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # CHAMP TVA SUPPRIMÉ
     total_ttc = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     montant_paye = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
@@ -442,15 +440,15 @@ class Paiement(models.Model):
 
         super().save(*args, **kwargs)
 
-        # Mise à jour de la facture (prend en compte ce paiement)
+        # Mise à jour de la facture
         self.mettre_a_jour_facture()
 
-        # Mise à jour de la vente si elle existe
+        # Mise à jour de la vente
         if self.vente:
             self.mettre_a_jour_vente()
 
     def mettre_a_jour_facture(self):
-        """Recompte le total payé de la facture à partir de tous ses paiements."""
+        """Recompte le total payé de la facture"""
         total_paye = self.facture.paiements.filter(statut='completed').aggregate(
             total=models.Sum('montant')
         )['total'] or 0
