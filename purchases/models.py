@@ -4,7 +4,18 @@ from django.core.exceptions import ValidationError
 from users.models import CustomUser, Agence
 from produits.models import Product, ProductVariant
 from decimal import Decimal
+# purchases/models.py
 
+# ... autres imports ...
+from django.core.exceptions import ValidationError
+from django.db import models
+from django.core.validators import MinValueValidator, MaxValueValidator
+from django.utils import timezone
+from decimal import Decimal
+from users.models import CustomUser, Agence
+from produits.models import Product, ProductVariant
+
+# ...
 # models.py
 from django.db import models
 from django.conf import settings
@@ -315,11 +326,92 @@ class PurchaseReceipt(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # ============================================================
+    # DESTINATION DU DÉCAISSEMENT (AVEC CHAÎNES)
+    # ============================================================
+    caisse_destination = models.ForeignKey(
+        'tresorerie.Caisse',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receptions_achats',
+        verbose_name="Caisse de décaissement"
+    )
+    compte_destination = models.ForeignKey(
+        'tresorerie.CompteBancaire',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receptions_achats',
+        verbose_name="Compte bancaire de décaissement"
+    )
+    mouvement_tresorerie = models.ForeignKey(
+        'tresorerie.MouvementTresorerie',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reception_achat',
+        verbose_name="Mouvement de trésorerie associé"
+    )
+
     class Meta:
         ordering = ['-receipt_date']
 
     def __str__(self):
         return f"REC-{self.receipt_number}"
+
+    def creer_mouvement_decaissement(self, user):
+        """
+        Crée un mouvement de trésorerie pour le décaissement lié à cette réception.
+        Retourne le mouvement créé ou None.
+        """
+        # Si déjà un mouvement, on ne recrée pas
+        if self.mouvement_tresorerie:
+            return self.mouvement_tresorerie
+
+        # Récupérer le montant total de la commande (ou des produits reçus)
+        # On utilise le total de la commande (TTC)
+        montant = self.purchase_order.total
+        if montant <= 0:
+            return None
+
+        # Déterminer la destination
+        caisse = self.caisse_destination
+        compte = self.compte_destination
+
+        # Fallback : caisse par défaut de l'agence
+        if not caisse and not compte:
+            agence = self.purchase_order.agence
+            if agence:
+                from tresorerie.models import Caisse  # import local
+                caisse = Caisse.objects.filter(
+                    agence=agence, is_default=True).first()
+            if not caisse:
+                # Si aucune caisse par défaut, on ne crée pas le mouvement
+                return None
+
+        # Créer le mouvement de décaissement
+        from tresorerie.models import MouvementTresorerie  # import local
+        mouvement = MouvementTresorerie.objects.create(
+            type_mouvement='decaissement',
+            agence=self.purchase_order.agence,
+            source_type='achat',
+            source_id=self.purchase_order.id,
+            source_reference=self.purchase_order.order_number,
+            montant=montant,
+            mode_paiement='virement',  # valeur par défaut, à adapter
+            caisse=caisse,
+            compte_bancaire=compte,
+            date_mouvement=timezone.now(),
+            date_valeur=self.receipt_date,
+            status='effectue',
+            libelle=f"Décaissement pour réception {self.receipt_number} - commande {self.purchase_order.order_number}",
+            created_by=user
+        )
+        # Le mouvement est sauvegardé et le solde est diminué automatiquement
+        self.mouvement_tresorerie = mouvement
+        self.save(update_fields=['mouvement_tresorerie'])
+        return mouvement
 
 
 class PurchaseReceiptItem(models.Model):

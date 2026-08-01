@@ -192,7 +192,25 @@ class DevisCreateSerializer(serializers.ModelSerializer):
         return devis
 
 
+# sales/serializers.py
+
+
+# ... autres sérialiseurs ...
+
+# ============================================================
+# PAIEMENT SERIALIZERS
+# ============================================================
+# sales/serializers.py
+
+
+# ... autres sérialiseurs ...
+
+# ============================================================
+# PAIEMENT SERIALIZERS
+# ============================================================
+
 class PaiementSerializer(serializers.ModelSerializer):
+    """Serializer de lecture pour un paiement (inclut les infos de destination)"""
     encaisse_par_nom = serializers.CharField(
         source='encaisse_par.email', read_only=True)
 
@@ -231,19 +249,34 @@ class PaiementSerializer(serializers.ModelSerializer):
     client_raison_sociale = serializers.CharField(
         source='client.raison_sociale', read_only=True, default='')
 
+    # ============================================================
+    # NOUVEAUX CHAMPS : DESTINATION ET MOUVEMENT ASSOCIÉ
+    # ============================================================
+    caisse_destination_nom = serializers.CharField(
+        source='caisse_destination.nom', read_only=True, default=None)
+    compte_destination_nom = serializers.CharField(
+        source='compte_destination.nom', read_only=True, default=None)
+    mouvement_reference = serializers.CharField(
+        source='mouvement_tresorerie.reference', read_only=True, default=None)
+
     class Meta:
         model = Paiement
+        # On peut garder tous les champs (y compris les nouveaux)
         fields = '__all__'
-        read_only_fields = ('id', 'created_at', 'updated_at', 'encaisse_par')
+        read_only_fields = ('id', 'created_at', 'updated_at', 'encaisse_par',
+                            'mouvement_tresorerie')  # 'mouvement_tresorerie' en lecture seule
 
 
 class PaiementCreateSerializer(serializers.ModelSerializer):
+    """Serializer de création pour un paiement (inclut les champs de destination)"""
+
     class Meta:
         model = Paiement
-        fields = ('facture', 'montant', 'methode',
-                  'reference_externe', 'notes')
+        fields = ('facture', 'montant', 'methode', 'reference_externe', 'notes',
+                  'caisse_destination', 'compte_destination')  # ajout des champs de destination
 
     def validate(self, data):
+        # --- Validation du montant par rapport au reste de la facture ---
         facture = data.get('facture')
         if not facture:
             raise serializers.ValidationError(
@@ -252,16 +285,45 @@ class PaiementCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "montant": f"Le montant ({data['montant']}) dépasse le restant dû ({facture.montant_restant} FCFA)."
             })
+
+        # --- Validation des destinations ---
+        caisse = data.get('caisse_destination')
+        compte = data.get('compte_destination')
+
+        # Un seul des deux doit être renseigné
+        if caisse and compte:
+            raise serializers.ValidationError(
+                "Choisissez une seule destination : caisse ou compte bancaire."
+            )
+
+        # Si une destination est renseignée, elle doit appartenir à la même agence que la facture
+        if caisse and caisse.agence != facture.agence:
+            raise serializers.ValidationError(
+                {"caisse_destination": "La caisse doit appartenir à la même agence que la facture."}
+            )
+        if compte and compte.agence != facture.agence:
+            raise serializers.ValidationError(
+                {"compte_destination": "Le compte bancaire doit appartenir à la même agence que la facture."}
+            )
+
+        # Si aucune destination n'est précisée, on laissera le modèle tenter de prendre la caisse par défaut
+        # (la validation ne bloque pas, mais on peut ajouter un avertissement)
         return data
 
     def create(self, validated_data):
+        # L'utilisateur qui encaisse est l'utilisateur connecté
         validated_data['encaisse_par'] = self.context['request'].user
+
+        # Récupérer la facture pour en extraire le client et la vente
         facture = validated_data.get('facture')
-        if facture and facture.client:
+        if facture:
             validated_data['client'] = facture.client
-        if facture and facture.vente:
-            validated_data['vente'] = facture.vente
-        return super().create(validated_data)
+            if facture.vente:
+                validated_data['vente'] = facture.vente
+
+        # Créer le paiement (le modèle fera le reste : mise à jour facture/vente et création mouvement)
+        paiement = super().create(validated_data)
+        return paiement
 
 
 class FactureListSerializer(serializers.ModelSerializer):

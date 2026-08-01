@@ -179,6 +179,12 @@ class MouvementTresorerieCreateSerializer(serializers.ModelSerializer):
 # FRAIS SERIALIZERS
 # ============================================================
 
+# tresorerie/serializers.py
+
+# ============================================================
+# FRAIS SERIALIZERS (version complète)
+# ============================================================
+
 class FraisSerializer(serializers.ModelSerializer):
     categorie_display = serializers.CharField(
         source='get_categorie_display', read_only=True)
@@ -189,6 +195,14 @@ class FraisSerializer(serializers.ModelSerializer):
         source='get_mode_paiement_display', read_only=True)
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True, default=None)
+
+    # Nouveaux champs pour afficher les noms des destinations
+    caisse_destination_nom = serializers.CharField(
+        source='caisse_destination.nom', read_only=True
+    )
+    compte_destination_nom = serializers.CharField(
+        source='compte_destination.nom', read_only=True
+    )
 
     class Meta:
         model = Frais
@@ -206,32 +220,57 @@ class FraisSerializer(serializers.ModelSerializer):
             'notes',
             'created_by', 'created_by_email',
             'valide_par', 'date_validation',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
+            # Nouveaux champs
+            'caisse_destination', 'caisse_destination_nom',
+            'compte_destination', 'compte_destination_nom',
         )
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
 
-# ✅ AJOUT: FraisCreateSerializer (manquant)
 class FraisCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Frais
         fields = (
             'titre', 'agence', 'categorie', 'montant',
             'date_frais', 'date_paiement', 'beneficiaire',
-            'piece_justificative', 'mode_paiement', 'status', 'notes'
+            'piece_justificative', 'mode_paiement', 'status', 'notes',
+            'caisse_destination', 'compte_destination'
         )
 
     def validate(self, data):
+        # Validation du montant
         if data.get('montant', 0) <= 0:
             raise serializers.ValidationError({
                 'montant': 'Le montant doit être supérieur à 0'
             })
-        return data
 
+        # Validation des destinations
+        caisse = data.get('caisse_destination')
+        compte = data.get('compte_destination')
+        if caisse and compte:
+            raise serializers.ValidationError(
+                "Choisissez une seule destination (caisse ou compte)."
+            )
+
+        # Vérifier que la destination appartient à la même agence
+        agence = data.get('agence')
+        if agence:
+            if caisse and caisse.agence != agence:
+                raise serializers.ValidationError({
+                    'caisse_destination': 'La caisse doit appartenir à la même agence.'
+                })
+            if compte and compte.agence != agence:
+                raise serializers.ValidationError({
+                    'compte_destination': 'Le compte bancaire doit appartenir à la même agence.'
+                })
+
+        return data
 
 # ============================================================
 # PRÉVISIONS SERIALIZERS
 # ============================================================
+
 
 class PrevisionTresorerieSerializer(serializers.ModelSerializer):
     type_prevision_display = serializers.CharField(

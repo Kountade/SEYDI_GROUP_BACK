@@ -1,5 +1,8 @@
+# sales/models.py
+
 from django.db import models
 from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from users.models import CustomUser, Agence
 from produits.models import Product, ProductVariant
@@ -80,7 +83,6 @@ class Vente(models.Model):
     remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     remise_percentage = models.DecimalField(
         max_digits=5, decimal_places=2, default=0)
-    # CHAMP TVA SUPPRIMÉ
     total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     montant_paye = models.DecimalField(
@@ -146,7 +148,6 @@ class VenteItem(models.Model):
         default='retail'
     )
     remise = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    # TVA SUPPRIMÉE
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     stock_preleve = models.BooleanField(default=False)
@@ -160,7 +161,6 @@ class VenteItem(models.Model):
         return f"{self.product.name} x {self.quantity}"
 
     def save(self, *args, **kwargs):
-        # Calcul du total sans TVA
         self.total = (self.prix_unitaire * self.quantity) - self.remise
         super().save(*args, **kwargs)
 
@@ -301,7 +301,6 @@ class Facture(models.Model):
     sous_total = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
     remise = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    # CHAMP TVA SUPPRIMÉ
     total_ttc = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     montant_paye = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
@@ -413,6 +412,34 @@ class Paiement(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ============================================================
+    # DESTINATION DE L'ENCAISSEMENT (avec chaînes pour éviter l'import circulaire)
+    # ============================================================
+    caisse_destination = models.ForeignKey(
+        'tresorerie.Caisse',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='paiements_entrants_sales',
+        verbose_name="Caisse de destination"
+    )
+    compte_destination = models.ForeignKey(
+        'tresorerie.CompteBancaire',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='paiements_entrants_sales',
+        verbose_name="Compte bancaire de destination"
+    )
+    mouvement_tresorerie = models.ForeignKey(
+        'tresorerie.MouvementTresorerie',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='paiement_sale',
+        verbose_name="Mouvement de trésorerie associé"
+    )
+
     class Meta:
         ordering = ['-date_paiement']
         verbose_name = "Paiement"
@@ -438,12 +465,55 @@ class Paiement(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
+        # ✅ Création du mouvement de trésorerie si le paiement est complété
+        #    et qu'il n'y en a pas encore
+        if self.statut == 'completed' and not self.mouvement_tresorerie:
+            # Importer localement pour éviter l'import circulaire
+            from tresorerie.models import Caisse, CompteBancaire, MouvementTresorerie
+
+            # Déterminer la destination
+            caisse = self.caisse_destination
+            compte = self.compte_destination
+
+            # Fallback : caisse par défaut de l'agence (via la facture ou la vente)
+            if not caisse and not compte:
+                agence = None
+                if self.facture:
+                    agence = self.facture.agence
+                elif self.vente:
+                    agence = self.vente.agence
+                if agence:
+                    caisse = Caisse.objects.filter(
+                        agence=agence, is_default=True).first()
+                if not caisse:
+                    raise ValidationError(
+                        "Impossible de déterminer une caisse ou un compte de destination. "
+                        "Veuillez spécifier une destination ou configurer une caisse par défaut."
+                    )
+
+            # Créer le mouvement d'encaissement
+            mouvement = MouvementTresorerie.objects.create(
+                type_mouvement='encaissement',
+                agence=agence,
+                source_type='paiement_client',
+                source_id=self.id,
+                source_reference=self.reference,
+                montant=self.montant,
+                mode_paiement=self.methode,
+                caisse=caisse,
+                compte_bancaire=compte,
+                date_mouvement=timezone.now(),
+                date_valeur=timezone.now().date(),
+                status='effectue',
+                libelle=f"Paiement {self.reference} - {self.client.nom if self.client else ''}",
+                created_by=self.encaisse_par
+            )
+            self.mouvement_tresorerie = mouvement
+
         super().save(*args, **kwargs)
 
-        # Mise à jour de la facture
+        # Mise à jour de la facture et de la vente
         self.mettre_a_jour_facture()
-
-        # Mise à jour de la vente
         if self.vente:
             self.mettre_a_jour_vente()
 

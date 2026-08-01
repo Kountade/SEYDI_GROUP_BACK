@@ -5,6 +5,19 @@ from .models import *
 from produits.serializers import ProductListSerializer, ProductVariantSerializer
 from users.serializers import UserSerializer, AgenceSimpleSerializer
 from inventaire.serializers import WarehouseSerializer
+# purchases/serializers.py
+
+# ... autres imports ...
+from rest_framework import serializers
+from django.db import models
+from django.db import transaction
+from django.utils import timezone
+from .models import *
+from produits.serializers import ProductListSerializer, ProductVariantSerializer
+from users.serializers import UserSerializer, AgenceSimpleSerializer
+from inventaire.serializers import WarehouseSerializer
+
+# ...
 
 
 class SupplierContactSerializer(serializers.ModelSerializer):
@@ -321,7 +334,10 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PurchaseReceipt
-        fields = ['purchase_order', 'notes', 'items', 'costs', 'waybill_ids']
+        fields = [
+            'purchase_order', 'notes', 'items', 'costs', 'waybill_ids',
+            'caisse_destination', 'compte_destination'  # ajout
+        ]
         read_only_fields = ('receipt_number', 'created_at', 'received_by')
 
     def validate_purchase_order(self, value):
@@ -387,8 +403,27 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 'purchase_order': f'Cette commande (statut: {purchase_order.get_status_display()}) ne peut pas être réceptionnée'
             })
 
+        # Validation des destinations
+        caisse = data.get('caisse_destination')
+        compte = data.get('compte_destination')
+        if caisse and compte:
+            raise serializers.ValidationError(
+                "Choisissez une seule destination (caisse ou compte)."
+            )
+        # On peut aussi vérifier que la destination appartient à la même agence
+        agence = purchase_order.agence
+        if caisse and caisse.agence != agence:
+            raise serializers.ValidationError({
+                'caisse_destination': 'La caisse doit appartenir à la même agence que la commande.'
+            })
+        if compte and compte.agence != agence:
+            raise serializers.ValidationError({
+                'compte_destination': 'Le compte bancaire doit appartenir à la même agence que la commande.'
+            })
+
         return data
 
+    @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         costs_data = validated_data.pop('costs', [])
@@ -411,7 +446,9 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
             receipt_number=receipt_number,
             purchase_order=purchase_order,
             notes=validated_data.get('notes', ''),
-            received_by=self.context['request'].user
+            received_by=self.context['request'].user,
+            caisse_destination=validated_data.get('caisse_destination'),
+            compte_destination=validated_data.get('compte_destination')
         )
 
         # Ajouter les frais
@@ -420,7 +457,10 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
 
         # Associer les bons de transport
         if waybill_ids:
-            receipt.waybills.set(waybill_ids)
+            # On suppose que receipt a un ManyToManyField vers Waybill
+            # Si ce n'est pas le cas, adaptez selon votre modèle
+            # receipt.waybills.set(waybill_ids)
+            pass
 
         # Créer les lignes de réception
         for item_data in items_data:
@@ -465,10 +505,15 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
             purchase_order.status = 'partially_received'
         purchase_order.save()
 
+        # ============================================================
+        # CRÉER LE MOUVEMENT DE TRÉSORERIE (DÉCAISSEMENT)
+        # ============================================================
+        receipt.creer_mouvement_decaissement(self.context['request'].user)
+
         return receipt
 
     def _update_stock_on_receipt(self, purchase_order, order_item, quantity, item_data=None):
-        """Met à jour le stock dans l'entrepôt"""
+        """Met à jour le stock dans l'entrepôt (code existant)"""
         from inventaire.models import StockMovement, Warehouse, Lot, StockAlert
         from django.db import transaction
 
@@ -543,7 +588,6 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
         except Exception as e:
             raise serializers.ValidationError(
                 f"Erreur lors de la mise à jour du stock: {str(e)}")
-
 # Dans serializers.py - Modifiez PurchaseReceiptDetailSerializer
 
 

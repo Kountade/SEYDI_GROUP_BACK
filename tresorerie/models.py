@@ -390,9 +390,34 @@ class Frais(models.Model):
     mode_paiement = models.CharField(max_length=20, choices=MouvementTresorerie.MODE_PAIEMENT,
                                      default='especes', verbose_name="Mode de paiement")
 
-    # Lien vers le mouvement de trésorerie
-    mouvement = models.ForeignKey(MouvementTresorerie, on_delete=models.SET_NULL, null=True, blank=True,
-                                  related_name='frais_associes', verbose_name="Mouvement associé")
+    # ============================================================
+    # DESTINATION DU DÉCAISSEMENT (NOUVEAU)
+    # ============================================================
+    caisse_destination = models.ForeignKey(
+        'Caisse',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='frais_sortants',
+        verbose_name="Caisse de décaissement"
+    )
+    compte_destination = models.ForeignKey(
+        'CompteBancaire',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='frais_sortants',
+        verbose_name="Compte bancaire de décaissement"
+    )
+
+    mouvement = models.ForeignKey(
+        MouvementTresorerie,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='frais_associes',
+        verbose_name="Mouvement associé"
+    )
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='brouillon',
                               verbose_name="Statut")
@@ -430,8 +455,28 @@ class Frais(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
+        # ✅ Création du mouvement si le frais est payé et qu'il n'y en a pas encore
         if self.status == 'paye' and not self.mouvement:
-            # Créer automatiquement un mouvement de trésorerie
+            # Déterminer la destination
+            caisse = self.caisse_destination
+            compte = self.compte_destination
+
+            # Fallback : caisse par défaut si aucune destination choisie
+            if not caisse and not compte:
+                caisse = Caisse.objects.filter(
+                    agence=self.agence,
+                    is_default=True
+                ).first()
+                if not caisse:
+                    raise ValidationError(
+                        f"Aucune caisse par défaut pour l'agence '{self.agence.nom}'. "
+                        "Veuillez choisir une destination."
+                    )
+
+            # Créer le mouvement de décaissement
+            # La méthode save() de MouvementTresorerie gère automatiquement
+            # la mise à jour des soldes (puisque status='effectue' et pk is None).
+            # On n'appelle PAS _mettre_a_jour_soldes() ni save() manuellement.
             mouvement = MouvementTresorerie.objects.create(
                 type_mouvement='decaissement',
                 agence=self.agence,
@@ -440,20 +485,23 @@ class Frais(models.Model):
                 source_reference=self.reference,
                 montant=self.montant,
                 mode_paiement=self.mode_paiement,
+                caisse=caisse,
+                compte_bancaire=compte,
                 date_mouvement=timezone.now(),
                 date_valeur=self.date_paiement or timezone.now().date(),
                 status='effectue',
                 libelle=f"Frais: {self.titre}",
                 created_by=self.created_by
             )
+            # Le mouvement est déjà sauvegardé et a mis à jour le solde.
             self.mouvement = mouvement
 
         super().save(*args, **kwargs)
 
-
 # ============================================================
 # 5. PRÉVISIONS DE TRÉSORERIE
 # ============================================================
+
 
 class PrevisionTresorerie(models.Model):
     """

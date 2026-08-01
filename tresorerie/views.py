@@ -261,7 +261,6 @@ class MouvementTresorerieViewset(viewsets.ModelViewSet):
 # ============================================================
 # FRAIS VIEWSET
 # ============================================================
-
 class FraisViewset(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated,
                           IsPDGOrDRH | IsChefAgence | IsComptable]
@@ -318,11 +317,10 @@ class FraisViewset(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(frais)
         return Response(serializer.data)
-
-
 # ============================================================
 # PRÉVISIONS VIEWSET
 # ============================================================
+
 
 class PrevisionTresorerieViewset(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated,
