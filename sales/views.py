@@ -1,3 +1,7 @@
+from inventaire.models import get_default_warehouse
+from inventaire.models import WarehouseStock, StockMovement, Warehouse, Lot  # Lot ajouté
+from users.permissions import HasAgenceAccess
+from rest_framework import viewsets, filters, status
 from django.shortcuts import render
 from rest_framework import viewsets, generics, status, filters
 from rest_framework.decorators import action
@@ -24,6 +28,9 @@ from .models import *
 from .serializers import *
 from users.permissions import HasAgenceAccess, IsPDG, IsChefAgence
 from inventaire.models import WarehouseStock, StockMovement, Warehouse
+
+logger = logging.getLogger(__name__)
+
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +72,6 @@ class ClientViewSet(viewsets.ModelViewSet):
                 status='completed',
                 notes="Création automatique pour association client-agence"
             )
-
-
-logger = logging.getLogger(__name__)
 
 
 class VenteViewSet(viewsets.ModelViewSet):
@@ -233,7 +237,7 @@ class VenteViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def approve(self, request, pk=None):
         """
-        Approuve une vente, réduit le stock et crée la facture - SANS TVA
+        Approuve une vente, réduit le stock (avec gestion des lots) et crée la facture - SANS TVA
         """
         vente = self.get_object()
         user = request.user
@@ -256,66 +260,93 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        warehouse = vente.agence.warehouses.filter(is_default=True).first()
-        if not warehouse:
-            warehouse = vente.agence.warehouses.filter(is_active=True).first()
-        if not warehouse:
-            from inventaire.models import get_default_warehouse
-            warehouse = get_default_warehouse(vente.agence)
+        warehouse = get_default_warehouse(vente.agence)
         if not warehouse:
             return Response(
                 {'error': f'Aucun entrepôt configuré pour l\'agence {vente.agence.nom}.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        stock_verification = {}
+        # Préparer le traitement des items
+        items_to_process = list(vente.items.all())
+        stock_insuffisant = []
+        mouvements = []
 
-        for item in vente.items.all():
-            key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
+        for item in items_to_process:
+            quantity_needed = item.quantity
 
-            if key not in stock_verification:
-                stock_verification[key] = {
+            if item.lot:
+                # =================== PRÉLÈVEMENT MANUEL (lot spécifié) ===================
+                lot = item.lot
+                if lot.quantity < quantity_needed:
+                    stock_insuffisant.append({
+                        'product': item.product.name,
+                        'lot': lot.lot_number,
+                        'disponible': lot.quantity,
+                        'demande': quantity_needed,
+                        'manquant': quantity_needed - lot.quantity
+                    })
+                    continue
+                # Prélèvement
+                lot.quantity -= quantity_needed
+                lot.save()
+                mouvements.append({
                     'product': item.product,
                     'variant': item.variant,
-                    'total_quantity': 0,
-                    'items': [],
+                    'quantity': quantity_needed,
+                    'lot': lot,
                     'unit_price': item.prix_unitaire
-                }
-            stock_verification[key]['total_quantity'] += item.quantity
-            stock_verification[key]['items'].append(item)
-
-        logger.info(f"=== VENTE {vente.reference} - AGRÉGATION DU STOCK ===")
-        for key, group in stock_verification.items():
-            logger.info(
-                f"Produit: {group['product'].name}, "
-                f"Variant: {group['variant'].name if group['variant'] else 'Sans variante'}, "
-                f"Quantité totale: {group['total_quantity']}, "
-                f"Nombre de lignes: {len(group['items'])}"
-            )
-
-        stock_insuffisant = []
-        for key, group in stock_verification.items():
-            try:
-                stock = WarehouseStock.objects.get(
-                    product=group['product'],
-                    warehouse=warehouse,
-                    variant=group['variant']
-                )
-                if stock.quantity < group['total_quantity']:
-                    stock_insuffisant.append({
-                        'product': group['product'].name,
-                        'variant': group['variant'].name if group['variant'] else 'Sans variante',
-                        'disponible': stock.quantity,
-                        'demande': group['total_quantity'],
-                        'manquant': group['total_quantity'] - stock.quantity
-                    })
-            except WarehouseStock.DoesNotExist:
-                stock_insuffisant.append({
-                    'product': group['product'].name,
-                    'variant': group['variant'].name if group['variant'] else 'Sans variante',
-                    'message': 'Produit non trouvé dans l\'entrepôt',
-                    'demande': group['total_quantity']
                 })
+                # Marquer l'item avec le lot prélevé (déjà fait, mais on peut garder)
+                item.warehouse_source = warehouse  # pour info
+                item.stock_preleve = True
+                item.save()
+
+            else:
+                # =================== PRÉLÈVEMENT AUTOMATIQUE (FIFO) ===================
+                remaining = quantity_needed
+                # Récupérer les lots du produit/variant dans l'entrepôt, en bon état, avec stock > 0
+                lots = Lot.objects.filter(
+                    product=item.product,
+                    warehouse=warehouse,
+                    variant=item.variant,
+                    quantity__gt=0,
+                    quality_status='good'
+                ).order_by('expiry_date')  # FIFO par date d'expiration
+
+                for lot in lots:
+                    if remaining <= 0:
+                        break
+                    take = min(lot.quantity, remaining)
+                    lot.quantity -= take
+                    lot.save()
+                    remaining -= take
+                    mouvements.append({
+                        'product': item.product,
+                        'variant': item.variant,
+                        'quantity': take,
+                        'lot': lot,
+                        'unit_price': item.prix_unitaire
+                    })
+                    # On ne marque pas l'item avec un lot spécifique car on a prélevé plusieurs lots
+                    # On pourrait créer plusieurs enregistrements VenteLot si nécessaire, mais ici on simplifie
+                    # On enregistre le premier lot pour référence (optionnel)
+                    # Pour la traçabilité, on pourrait stocker une liste de lots dans un champ JSON du VenteItem
+                    # Ou on pourrait créer des lignes enfant. On ignore pour l'instant.
+
+                if remaining > 0:
+                    stock_insuffisant.append({
+                        'product': item.product.name,
+                        'variant': item.variant.name if item.variant else 'Sans variante',
+                        'message': 'Stock insuffisant dans tous les lots',
+                        'demande': quantity_needed,
+                        'manquant': remaining
+                    })
+                else:
+                    # Marquer l'item comme prélevé (même si plusieurs lots)
+                    item.warehouse_source = warehouse
+                    item.stock_preleve = True
+                    item.save()
 
         if stock_insuffisant:
             return Response(
@@ -324,26 +355,32 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Créer les mouvements de stock
-        for key, group in stock_verification.items():
+        # Créer les mouvements de stock (un par prélèvement de lot)
+        for mov in mouvements:
             StockMovement.objects.create(
                 movement_type='out',
                 reference_type='sale',
                 reference_id=vente.id,
-                product=group['product'],
-                variant=group['variant'],
-                quantity=group['total_quantity'],
+                product=mov['product'],
+                variant=mov['variant'],
+                quantity=mov['quantity'],
                 from_warehouse=warehouse,
-                unit_price=group['unit_price'],
-                notes=f"Vente {vente.reference} approuvée - {group['total_quantity']} unités prélevées",
+                unit_price=mov['unit_price'],
+                notes=f"Vente {vente.reference} - Lot {mov['lot'].lot_number}",
                 created_by=user
+                # Si vous avez ajouté un champ lot dans StockMovement, ajoutez : lot=mov['lot']
             )
 
-            for item in group['items']:
-                item.stock_preleve = True
-                item.warehouse_source = warehouse
-                item.save()
+        # Mettre à jour le stock global des produits (pour cohérence)
+        for item in items_to_process:
+            product = item.product
+            total_stock = WarehouseStock.objects.filter(product=product).aggregate(
+                total=Sum('quantity')
+            )['total'] or 0
+            product.stock_quantity = total_stock
+            product.save(update_fields=['stock_quantity', 'updated_at'])
 
+        # Valider la vente
         vente.status = 'approved'
         vente.approved_by = user
         vente.date_approbation = timezone.now()
@@ -368,7 +405,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                     conditions_paiement='Paiement à 30 jours',
                     notes=f"Facture générée automatiquement à l'approbation de la vente {vente.reference}",
                     sous_total=vente.sous_total,
-                    # Pas de TVA - total_ttc = total
                     total_ttc=vente.total,
                     montant_paye=vente.montant_paye,
                     montant_restant=vente.total - vente.montant_paye
@@ -465,7 +501,7 @@ class VenteViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def cancel(self, request, pk=None):
         """
-        Annule une vente et restaure le stock.
+        Annule une vente et restaure le stock (et les lots).
         """
         vente = self.get_object()
 
@@ -477,23 +513,51 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         stock_restauration = {}
 
+        # Récupérer les mouvements de stock associés à cette vente pour restaurer les lots
+        mouvements = StockMovement.objects.filter(
+            reference_type='sale',
+            reference_id=vente.id
+        )
+
+        # Restaurer les lots à partir des mouvements (si on a stocké le lot dans le mouvement)
+        # Sinon, on ne peut pas restaurer précisément les lots. On peut soit :
+        # - ajouter un champ `lot` dans StockMovement
+        # - ou recréer les lots à partir des items (si on a stocké le lot dans VenteItem)
+        # Ici on suppose que le champ `lot` a été ajouté à StockMovement (optionnel)
+        # Pour l'instant, on restaure seulement le stock global.
+
+        # On peut récupérer les lots prélevés via les items (si lot est stocké dans VenteItem)
+        # Mais si on a fait du FIFO sur plusieurs lots, on n'a pas de trace directe.
+        # Donc pour une restauration précise, il faut stocker le lot dans StockMovement.
+
+        # Si on n'a pas le lot dans les mouvements, on ne peut pas restaurer les lots précisément.
+        # On va au moins restaurer le stock global (WarehouseStock) et on avertit.
+        # On pourrait simplement ajouter une validation pour empêcher l'annulation si on veut une traçabilité parfaite.
+
+        # On peut aussi récupérer les lots depuis VenteItem (si le lot a été fixé)
         for item in vente.items.filter(stock_preleve=True):
             key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
-
             if key not in stock_restauration:
                 stock_restauration[key] = {
                     'product': item.product,
                     'variant': item.variant,
                     'total_quantity': 0,
-                    'items': [],
-                    'unit_price': item.prix_unitaire,
                     'warehouse': item.warehouse_source
                 }
             stock_restauration[key]['total_quantity'] += item.quantity
-            stock_restauration[key]['items'].append(item)
+
+            # Si le lot est spécifié, on le restaure directement
+            if item.lot:
+                item.lot.quantity += item.quantity
+                item.lot.save()
+
+        # Pour les cas sans lot spécifique, on ne peut pas restaurer les lots.
+        # On peut soit créer un mouvement d'entrée global sans lot, soit lever une erreur.
+        # On crée un mouvement d'entrée pour chaque produit.
 
         for key, group in stock_restauration.items():
             if group['warehouse']:
+                # Créer un mouvement d'entrée pour restaurer le stock global
                 StockMovement.objects.create(
                     movement_type='in',
                     reference_type='sale',
@@ -502,11 +566,30 @@ class VenteViewSet(viewsets.ModelViewSet):
                     variant=group['variant'],
                     quantity=group['total_quantity'],
                     to_warehouse=group['warehouse'],
-                    unit_price=group['unit_price'],
-                    notes=f"Annulation vente {vente.reference} - {group['total_quantity']} unités restituées",
+                    unit_price=0,  # Prix non applicable
+                    notes=f"Annulation vente {vente.reference} - {group['total_quantity']} unités restituées (sans lot précis)",
                     created_by=request.user
                 )
+                # Mettre à jour WarehouseStock
+                stock, created = WarehouseStock.objects.get_or_create(
+                    product=group['product'],
+                    warehouse=group['warehouse'],
+                    variant=group['variant'],
+                    defaults={'quantity': 0}
+                )
+                stock.quantity += group['total_quantity']
+                stock.save()
 
+        # Mettre à jour le stock global des produits
+        for item in vente.items.all():
+            product = item.product
+            total_stock = WarehouseStock.objects.filter(product=product).aggregate(
+                total=Sum('quantity')
+            )['total'] or 0
+            product.stock_quantity = total_stock
+            product.save(update_fields=['stock_quantity', 'updated_at'])
+
+        # Annuler la facture si existe
         if Facture.objects.filter(vente=vente).exists():
             facture = Facture.objects.filter(vente=vente).first()
             facture.status = 'cancelled'

@@ -132,6 +132,14 @@ class VenteItem(models.Model):
         ('retail', 'Prix de détail'),
         ('wholesale', 'Prix de gros'),
     )
+    lot = models.ForeignKey(
+        'inventaire.Lot',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='vente_items',
+        help_text="Lot prélevé pour cette ligne (si sélection manuelle)"
+    )
 
     vente = models.ForeignKey(
         Vente, on_delete=models.CASCADE, related_name='items')

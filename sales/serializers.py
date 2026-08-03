@@ -1,9 +1,13 @@
 from rest_framework import serializers
 from django.db.models import Sum
 from decimal import Decimal
+from django.utils import timezone
 from .models import *
 from produits.serializers import ProductListSerializer
 from users.serializers import UserSerializer, AgenceSimpleSerializer
+from inventaire.models import Lot  # <-- AJOUT
+# si vous voulez afficher des détails
+from inventaire.serializers import LotListSerializer
 
 
 class ClientSerializer(serializers.ModelSerializer):
@@ -13,6 +17,9 @@ class ClientSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at', 'updated_at', 'created_by')
 
 
+# ============================================================
+# VENTE ITEM SERIALIZER – avec lot
+# ============================================================
 class VenteItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
@@ -20,13 +27,31 @@ class VenteItemSerializer(serializers.ModelSerializer):
     price_type_display = serializers.CharField(
         source='get_price_type_display', read_only=True)
 
+    # Champs supplémentaires pour le lot
+    lot_number = serializers.CharField(
+        source='lot.lot_number', read_only=True, allow_null=True)
+    lot_expiry = serializers.DateField(
+        source='lot.expiry_date', read_only=True, allow_null=True)
+    lot_quantity = serializers.IntegerField(
+        source='lot.quantity', read_only=True, allow_null=True)
+
     class Meta:
         model = VenteItem
         exclude = ('vente',)
-        read_only_fields = ('id', 'total', 'stock_preleve',
-                            'product_name', 'product_reference', 'price_type_display')
+        read_only_fields = (
+            'id', 'total', 'stock_preleve',
+            'product_name', 'product_reference', 'price_type_display',
+            'lot_number', 'lot_expiry', 'lot_quantity'
+        )
+        extra_kwargs = {
+            # le champ lot est en écriture (ID)
+            'lot': {'required': False, 'allow_null': True}
+        }
 
 
+# ============================================================
+# VENTE LIST SERIALIZER (inchangé)
+# ============================================================
 class VenteListSerializer(serializers.ModelSerializer):
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
     client_nom = serializers.CharField(
@@ -37,12 +62,17 @@ class VenteListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Vente
-        fields = ('id', 'reference', 'type_vente', 'agence_nom', 'client_nom',
-                  'vendeur_nom', 'status', 'status_display', 'date_vente',
-                  'sous_total', 'remise', 'total', 'montant_paye',
-                  'montant_du', 'est_paye')  # tva supprimé
+        fields = (
+            'id', 'reference', 'type_vente', 'agence_nom', 'client_nom',
+            'vendeur_nom', 'status', 'status_display', 'date_vente',
+            'sous_total', 'remise', 'total', 'montant_paye',
+            'montant_du', 'est_paye'
+        )
 
 
+# ============================================================
+# VENTE DETAIL SERIALIZER (inchangé)
+# ============================================================
 class VenteDetailSerializer(serializers.ModelSerializer):
     agence = AgenceSimpleSerializer(read_only=True)
     client = ClientSerializer(read_only=True)
@@ -54,9 +84,12 @@ class VenteDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Vente
-        fields = '__all__'  # Le modèle n'a plus de champ tva
+        fields = '__all__'
 
 
+# ============================================================
+# VENTE CREATE SERIALIZER – avec gestion des lots
+# ============================================================
 class VenteCreateSerializer(serializers.ModelSerializer):
     items = VenteItemSerializer(many=True, write_only=True)
     client_id = serializers.IntegerField(required=False, allow_null=True)
@@ -64,15 +97,67 @@ class VenteCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vente
         fields = ('type_vente', 'agence', 'client_id', 'notes', 'items')
-        read_only_fields = ('id', 'reference', 'status', 'vendeur', 'date_vente',
-                            'sous_total', 'remise', 'total', 'montant_paye',
-                            'montant_du', 'est_paye')  # tva supprimé
+        read_only_fields = (
+            'id', 'reference', 'status', 'vendeur', 'date_vente',
+            'sous_total', 'remise', 'total', 'montant_paye',
+            'montant_du', 'est_paye'
+        )
 
     def validate(self, data):
         items_data = data.get('items', [])
         if not items_data:
             raise serializers.ValidationError(
                 {"items": "Au moins un article est requis"})
+
+        agence = data.get('agence')
+        if not agence:
+            raise serializers.ValidationError(
+                {"agence": "L'agence est obligatoire"})
+
+        # Récupérer l'entrepôt par défaut de l'agence
+        from inventaire.models import get_default_warehouse
+        warehouse = get_default_warehouse(agence)
+        if not warehouse:
+            raise serializers.ValidationError(
+                {"agence": "Aucun entrepôt configuré pour cette agence"})
+
+        # Valider chaque item
+        for idx, item_data in enumerate(items_data):
+            product = item_data.get('product')
+            quantity = item_data.get('quantity', 0)
+            # peut être un ID (int) ou un objet Lot
+            lot_id = item_data.get('lot')
+
+            if lot_id:
+                try:
+                    if isinstance(lot_id, Lot):
+                        lot_obj = lot_id
+                    else:
+                        lot_obj = Lot.objects.get(id=int(lot_id))
+                except Lot.DoesNotExist:
+                    raise serializers.ValidationError({
+                        f"items[{idx}]": f"Lot {lot_id} introuvable"
+                    })
+
+                # Vérifications du lot
+                if lot_obj.warehouse != warehouse:
+                    raise serializers.ValidationError({
+                        f"items[{idx}]": f"Le lot {lot_obj.lot_number} n'appartient pas à l'entrepôt de l'agence"
+                    })
+                if lot_obj.quantity < quantity:
+                    raise serializers.ValidationError({
+                        f"items[{idx}]": f"Le lot {lot_obj.lot_number} n'a que {lot_obj.quantity} unités disponibles, vous demandez {quantity}"
+                    })
+                if lot_obj.quality_status != 'good':
+                    raise serializers.ValidationError({
+                        f"items[{idx}]": f"Le lot {lot_obj.lot_number} n'est pas en bon état (statut: {lot_obj.get_quality_status_display()})"
+                    })
+
+                # On remplace l'éventuel objet Lot par son ID pour la création
+                item_data['lot'] = lot_obj.id
+
+            # Si pas de lot, on laisse le champ vide (None) – le système fera FIFO à l'approbation
+
         return data
 
     def create(self, validated_data):
@@ -86,8 +171,7 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             qte = Decimal(str(item.get('quantity', 0)))
             sous_total += prix * qte
 
-        # TVA SUPPRIMÉE - total = sous_total
-        total = sous_total
+        total = sous_total  # Pas de TVA
 
         vente = Vente.objects.create(
             **validated_data,
@@ -98,8 +182,11 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             montant_du=total
         )
 
+        # Création des lignes de vente
         for item_data in items_data:
-            VenteItem.objects.create(vente=vente, **item_data)
+            # Extraire le lot (qui est un ID ou None)
+            lot_id = item_data.pop('lot', None)
+            VenteItem.objects.create(vente=vente, lot_id=lot_id, **item_data)
 
         return vente
 
@@ -191,23 +278,6 @@ class DevisCreateSerializer(serializers.ModelSerializer):
 
         return devis
 
-
-# sales/serializers.py
-
-
-# ... autres sérialiseurs ...
-
-# ============================================================
-# PAIEMENT SERIALIZERS
-# ============================================================
-# sales/serializers.py
-
-
-# ... autres sérialiseurs ...
-
-# ============================================================
-# PAIEMENT SERIALIZERS
-# ============================================================
 
 class PaiementSerializer(serializers.ModelSerializer):
     """Serializer de lecture pour un paiement (inclut les infos de destination)"""
