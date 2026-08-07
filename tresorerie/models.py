@@ -714,7 +714,7 @@ class TresorerieJournaliere(models.Model):
     """
     Suivi journalier de la trésorerie
     """
-    date = models.DateField(unique=True, verbose_name="Date")
+    date = models.DateField(verbose_name="Date")  
     agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='tresorerie_journaliere',
                                verbose_name="Agence")
 

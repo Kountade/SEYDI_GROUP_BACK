@@ -1,7 +1,10 @@
-# produits/models.py
+# products/models.py
 
+import os
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.dispatch import receiver
+from django.db.models.signals import pre_delete, post_delete
 from users.models import CustomUser
 
 
@@ -120,6 +123,45 @@ class ProductImage(models.Model):
     class Meta:
         ordering = ['-is_main', 'created_at']
 
+    def delete(self, *args, **kwargs):
+        """Supprime physiquement le fichier image lors de la suppression de l'objet"""
+        # Supprimer le fichier physique
+        if self.image and os.path.isfile(self.image.path):
+            os.remove(self.image.path)
+        super().delete(*args, **kwargs)
+
+
+# Signal pour supprimer les fichiers image lors de la suppression d'un ProductImage
+@receiver(post_delete, sender=ProductImage)
+def delete_product_image_file(sender, instance, **kwargs):
+    """Supprime le fichier image du système de fichiers après suppression de l'objet"""
+    if instance.image and os.path.isfile(instance.image.path):
+        try:
+            os.remove(instance.image.path)
+        except Exception as e:
+            # Log l'erreur mais continue
+            print(f"Erreur lors de la suppression du fichier image: {e}")
+
+
+# Signal pour supprimer les fichiers image lors de la suppression d'un Product
+@receiver(pre_delete, sender=Product)
+def delete_product_files(sender, instance, **kwargs):
+    """Supprime les images associées lors de la suppression d'un produit"""
+    # Supprimer l'image principale
+    if instance.main_image and os.path.isfile(instance.main_image.path):
+        try:
+            os.remove(instance.main_image.path)
+        except Exception as e:
+            print(f"Erreur lors de la suppression de l'image principale: {e}")
+    
+    # Supprimer les images de la galerie
+    for image in instance.images.all():
+        if image.image and os.path.isfile(image.image.path):
+            try:
+                os.remove(image.image.path)
+            except Exception as e:
+                print(f"Erreur lors de la suppression de l'image: {e}")
+
 
 class ProductVariant(models.Model):
     product = models.ForeignKey(
@@ -133,8 +175,6 @@ class ProductVariant(models.Model):
 
     def __str__(self):
         return f"{self.product.name} - {self.sku}"
-
-# products/models.py - Corrigez la classe ProductPricing
 
 
 class ProductPricing(models.Model):
@@ -196,8 +236,6 @@ class ProductPricing(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        # Supprimez unique_together temporairement
-        # unique_together = ['product', 'warehouse']  # COMMENTEZ CETTE LIGNE
         ordering = ['product__name', 'warehouse__name']
         verbose_name = "Prix par entrepôt"
         verbose_name_plural = "Prix par entrepôt"

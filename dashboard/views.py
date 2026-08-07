@@ -1,3 +1,6 @@
+from .permissions import IsChefAgenceOrAbove  # ← permission élargie
+from django.db.models import Sum, Avg, F
+import logging
 from rest_framework import viewsets, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
@@ -297,77 +300,175 @@ class StatistiquesViewSet(viewsets.ViewSet):
         return Response(data)
 
 
+try:
+    from produits.models import ProductPricing
+    HAS_PRICING = True
+except ImportError:
+    HAS_PRICING = False
+
+# analyses/views.py
+# Version complète et professionnelle du AnalysesViewSet
+
+
+# Logger pour le suivi des erreurs
+logger = logging.getLogger(__name__)
+
+# Essayer d'importer ProductPricing si disponible
+try:
+    from produits.models import ProductPricing
+    HAS_PRICING = True
+except ImportError:
+    HAS_PRICING = False
+
+
 class AnalysesViewSet(viewsets.ViewSet):
     """
     Analyses avancées : tendances, prévisions, marges.
-    """
-    permission_classes = [IsAuthenticated, IsPDGOrDRH]  # Accès restreint
 
+    ✅ Permission : accessible aux chefs d'agence, DRH et PDG.
+    ❌ Anciennement réservé aux PDG/DRH (IsPDGOrDRH) – élargi pour les chefs d'agence.
+    """
+
+    # ============================================================
+    # PERMISSIONS
+    # ============================================================
+    permission_classes = [IsAuthenticated, IsChefAgenceOrAbove]
+
+    # ============================================================
+    # 1. TENDANCE DES VENTES (6 mois)
+    # ============================================================
     @action(detail=False, methods=['get'])
     def tendance_ventes(self, request):
-        """Évolution des ventes sur 6 mois (compatible SQLite)."""
-        today = timezone.now().date()
-        start_date = today - timedelta(days=180)
-        ventes = Vente.objects.filter(
-            status='completed',
-            date_vente__date__gte=start_date
-        ).values('date_vente__year', 'date_vente__month').annotate(
-            total=Sum('total')
-        ).order_by('date_vente__year', 'date_vente__month')
+        """
+        Évolution des ventes sur les 6 derniers mois.
+        Compatible avec SQLite (pas de DATE_TRUNC).
+        Retourne une liste de {mois: 'YYYY-MM', total: float}.
+        """
+        try:
+            today = timezone.now().date()
+            start_date = today - timedelta(days=180)
 
-        result = []
-        for v in ventes:
-            year = v['date_vente__year']
-            month = v['date_vente__month']
-            mois = f"{year}-{month:02d}"
-            result.append({
-                'mois': mois,
-                'total': float(v['total'])
-            })
-        return Response(result)
+            # Agrégation par année/mois (SQLite compatible)
+            ventes = (
+                Vente.objects
+                .filter(status='completed', date_vente__date__gte=start_date)
+                .values('date_vente__year', 'date_vente__month')
+                .annotate(total=Sum('total'))
+                .order_by('date_vente__year', 'date_vente__month')
+            )
 
+            result = []
+            for v in ventes:
+                year = v['date_vente__year']
+                month = v['date_vente__month']
+                mois = f"{year}-{month:02d}"
+                # Sécurisation : si total est None, on met 0.0
+                total = float(v['total']) if v['total'] is not None else 0.0
+                result.append({'mois': mois, 'total': total})
+
+            return Response(result)
+
+        except Exception as e:
+            logger.error(f"Erreur dans tendance_ventes : {e}", exc_info=True)
+            return Response(
+                {"error": "Erreur interne lors du calcul de la tendance"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # ============================================================
+    # 2. MARGE MOYENNE PAR PRODUIT
+    # ============================================================
     @action(detail=False, methods=['get'])
     def marge_moyenne(self, request):
-        """Marge moyenne par produit."""
-        # On vérifie si le champ purchase_price existe dans Product
-        if not hasattr(Product, 'purchase_price'):
-            return Response({"error": "Le champ purchase_price n'existe pas dans le modèle Product."}, status=status.HTTP_400_BAD_REQUEST)
+        """
+        Calcule la marge moyenne (prix de vente - prix d'achat) pour chaque produit.
+        Nécessite que le champ purchase_price existe dans Product.
+        """
+        try:
+            # Vérifier la présence du champ purchase_price
+            if not hasattr(Product, 'purchase_price'):
+                logger.warning(
+                    "Le champ purchase_price n'existe pas dans Product")
+                return Response(
+                    {"error": "Le champ purchase_price n'existe pas dans le modèle Product."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        from django.db.models import Avg, F
-        ventes_items = VenteItem.objects.filter(
-            vente__status='completed'
-        ).values('product__name').annotate(
-            marge_moyenne=Avg(F('prix_unitaire') -
-                              F('product__purchase_price'))
-        ).order_by('-marge_moyenne')[:20]
-        return Response(ventes_items)
+            # Agrégation
+            ventes_items = (
+                VenteItem.objects
+                .filter(vente__status='completed')
+                .values('product__name')
+                .annotate(
+                    marge_moyenne=Avg(F('prix_unitaire') -
+                                      F('product__purchase_price'))
+                )
+                .order_by('-marge_moyenne')[:20]
+            )
 
+            # Convertir Decimal en float pour JSON
+            for item in ventes_items:
+                if item['marge_moyenne'] is not None:
+                    item['marge_moyenne'] = float(item['marge_moyenne'])
+
+            return Response(ventes_items)
+
+        except Exception as e:
+            logger.error(f"Erreur dans marge_moyenne : {e}", exc_info=True)
+            return Response(
+                {"error": "Erreur lors du calcul des marges"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # ============================================================
+    # 3. PRÉVISIONS DE RUPTURE DE STOCK
+    # ============================================================
     @action(detail=False, methods=['get'])
     def prevision_stock(self, request):
-        """Prévision de rupture de stock."""
-        from django.db.models import Sum
-        today = timezone.now().date()
-        start_date = today - timedelta(days=30)
+        """
+        Identifie les produits risquant une rupture de stock dans les 15 jours.
+        Se base sur la consommation moyenne des 30 derniers jours.
+        Retourne une liste de produits avec jours restants estimés.
+        """
+        try:
+            from django.db.models import Sum
+            today = timezone.now().date()
+            start_date = today - timedelta(days=30)
 
-        consommation = VenteItem.objects.filter(
-            vente__status='completed',
-            vente__date_vente__date__gte=start_date
-        ).values('product_id').annotate(
-            total_vendu=Sum('quantity')
-        )
+            # Consommation par produit sur 30 jours
+            consommation = (
+                VenteItem.objects
+                .filter(vente__status='completed', vente__date_vente__date__gte=start_date)
+                .values('product_id')
+                .annotate(total_vendu=Sum('quantity'))
+            )
 
-        stocks = WarehouseStock.objects.filter(quantity__gt=0)
-        previsions = []
-        for stock in stocks:
-            conso = next(
-                (c['total_vendu'] for c in consommation if c['product_id'] == stock.product.id), 0)
-            if conso > 0:
-                jours_restants = stock.quantity / conso * 30
-                if jours_restants < 15:
-                    previsions.append({
-                        'produit': stock.product.name,
-                        'stock': stock.quantity,
-                        'conso_mensuelle': conso,
-                        'jours_restants': round(jours_restants, 1)
-                    })
-        return Response(previsions)
+            # Dictionnaire de consommation
+            conso_dict = {c['product_id']: c['total_vendu']
+                          for c in consommation}
+
+            # Stocks actuels (uniquement les produits avec stock > 0)
+            stocks = WarehouseStock.objects.filter(
+                quantity__gt=0).select_related('product')
+
+            previsions = []
+            for stock in stocks:
+                conso = conso_dict.get(stock.product.id, 0)
+                if conso > 0:
+                    jours_restants = stock.quantity / conso * 30
+                    if jours_restants < 15:
+                        previsions.append({
+                            'produit': stock.product.name,
+                            'stock': stock.quantity,
+                            'conso_mensuelle': conso,
+                            'jours_restants': round(jours_restants, 1)
+                        })
+
+            return Response(previsions)
+
+        except Exception as e:
+            logger.error(f"Erreur dans prevision_stock : {e}", exc_info=True)
+            return Response(
+                {"error": "Erreur lors du calcul des prévisions de stock"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
