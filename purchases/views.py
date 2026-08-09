@@ -1,4 +1,9 @@
 # users/views.py - Version complète et corrigée
+from datetime import timedelta
+from decimal import Decimal
+from django.db import transaction
+from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Q
 from django.shortcuts import render
 from rest_framework import viewsets, generics, status
 from rest_framework.response import Response
@@ -211,18 +216,19 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
 # purchases/views.py - AJOUTEZ cette vue
 
+
 class PurchaseOrderItemReceiptHistoryView(generics.ListAPIView):
     """Historique des réceptions pour une ligne de commande"""
     serializer_class = PurchaseReceiptItemSerializer
     permission_classes = [IsAuthenticated, HasAgenceAccess]
-    
+
     def get_queryset(self):
         order_item_id = self.kwargs['order_item_id']
         return PurchaseReceiptItem.objects.filter(
             order_item_id=order_item_id
         ).order_by('-receipt__created_at')
 
-    
+
 class PurchaseOrderBySupplierView(generics.ListAPIView):
     """Commandes par fournisseur"""
     serializer_class = PurchaseOrderListSerializer
@@ -464,16 +470,6 @@ class PurchaseReceiptCreateView(generics.CreateAPIView):
 
 # purchases/views.py
 
-from rest_framework import viewsets, generics, status
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Sum, Count, Q
-from django.utils import timezone
-from rest_framework.decorators import action
-from .models import *
-from .serializers import *
-from users.permissions import HasAgenceAccess
-
 
 class PurchaseOrdersReceivableView(generics.ListAPIView):
     """Liste des commandes pouvant être réceptionnées"""
@@ -482,30 +478,30 @@ class PurchaseOrdersReceivableView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        
+
         if user.est_pdg() or user.est_drh():
             queryset = PurchaseOrder.objects.all()
         else:
             agences_ids = user.get_agences().values_list('id', flat=True)
             queryset = PurchaseOrder.objects.filter(agence_id__in=agences_ids)
-        
+
         # ✅ Filtrer les commandes qui peuvent être réceptionnées
         # Exclure: draft, received, cancelled, rejected
         # Inclure: confirmed, sent, in_transit, partially_received
         queryset = queryset.exclude(
             status__in=['draft', 'received', 'cancelled', 'rejected']
         )
-        
+
         # ✅ Filtrer pour garder uniquement celles avec des articles restants
         result = []
         for order in queryset:
             has_remaining = any(
-                item.quantity_ordered > item.quantity_received 
+                item.quantity_ordered > item.quantity_received
                 for item in order.items.all()
             )
             if has_remaining:
                 result.append(order.id)
-        
+
         # Trier : partiellement reçues en premier
         orders = queryset.filter(id__in=result)
         return orders.order_by(
@@ -513,21 +509,6 @@ class PurchaseOrdersReceivableView(generics.ListAPIView):
         )
 
 # purchases/views.py - PurchaseReceiptViewSet COMPLET CORRIGÉ
-
-from rest_framework import viewsets, generics, status
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Sum, Count
-from django.utils import timezone
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
-from decimal import Decimal
-from .models import *
-from .serializers import *
-from users.permissions import HasAgenceAccess
-from inventaire.models import StockMovement, Warehouse
 
 
 class PurchaseReceiptViewSet(viewsets.ModelViewSet):
@@ -562,29 +543,29 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         Utilise total_received_amount comme Sodepci
         """
         receipt = self.get_object()
-        
+
         # Vérifier si une facture existe déjà
         if receipt.invoices.exists():
             return Response(
                 {'error': 'Une facture existe déjà pour cette réception'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # ✅ Calculer le total de la réception avec la propriété
         total_reception = receipt.total_received_amount
-        
+
         print(f"💰 TOTAL RÉCEPTION CALCULÉ: {total_reception}")
         print(f"📦 NOMBRE D'ITEMS: {receipt.items.count()}")
-        
+
         # Vérifier si le montant est valide
         if total_reception <= 0:
             return Response(
                 {'error': f'Le montant total de la réception est nul ({total_reception})'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         purchase_order = receipt.purchase_order
-        
+
         # ✅ Créer la facture avec le total calculé
         invoice = Invoice.objects.create(
             agence=purchase_order.agence,
@@ -606,9 +587,10 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
             amount_paid=Decimal('0'),
             amount_remaining=total_reception
         )
-        
-        print(f"📄 FACTURE CRÉÉE: {invoice.invoice_number} - Total: {invoice.total}")
-        
+
+        print(
+            f"📄 FACTURE CRÉÉE: {invoice.invoice_number} - Total: {invoice.total}")
+
         # ✅ Créer les lignes de facture
         items_created = 0
         for item in receipt.items.all():
@@ -626,15 +608,16 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
                     tax_rate=Decimal('0'),
                 )
                 items_created += 1
-                print(f"  ➕ Ligne: {order_item.product.name} - {order_item.unit_price} x {item.quantity}")
-        
+                print(
+                    f"  ➕ Ligne: {order_item.product.name} - {order_item.unit_price} x {item.quantity}")
+
         if items_created == 0:
             invoice.delete()
             return Response(
                 {'error': 'Aucune ligne de facture créée'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # ✅ Recalculer les totaux après création des items
         invoice.refresh_from_db()
         subtotal = sum(item.total for item in invoice.items.all())
@@ -642,9 +625,10 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         invoice.total = subtotal
         invoice.amount_remaining = subtotal - invoice.amount_paid
         invoice.save(update_fields=['subtotal', 'total', 'amount_remaining'])
-        
-        print(f"✅ FACTURE FINALISÉE: {invoice.invoice_number} - Total: {invoice.total}")
-        
+
+        print(
+            f"✅ FACTURE FINALISÉE: {invoice.invoice_number} - Total: {invoice.total}")
+
         # ✅ Retourner la facture créée
         serializer = InvoiceSerializer(invoice, context={'request': request})
         return Response({
@@ -667,13 +651,13 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         """
         receipt = self.get_object()
         invoice = receipt.invoices.first()
-        
+
         if not invoice:
             return Response(
                 {'error': 'Aucune facture associée à cette réception'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+
         serializer = InvoiceSerializer(invoice, context={'request': request})
         return Response(serializer.data)
 
@@ -687,33 +671,34 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         ✅ Crée ou met à jour la facture d'une réception
         """
         receipt = self.get_object()
-        
+
         # ✅ Calculer le total avec la propriété
         total_reception = receipt.total_received_amount
-        
+
         if total_reception <= 0:
             return Response(
                 {'error': f'Le montant total de la réception est nul ({total_reception})'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # Vérifier si une facture existe déjà
         if receipt.invoices.exists():
             # Mettre à jour la facture existante
             invoice = receipt.invoices.first()
-            
+
             # Supprimer les anciens items
             invoice.items.all().delete()
-            
+
             # Mettre à jour les montants
             invoice.subtotal = total_reception
             invoice.total = total_reception
             invoice.amount_remaining = total_reception - invoice.amount_paid
-            invoice.save(update_fields=['subtotal', 'total', 'amount_remaining'])
+            invoice.save(update_fields=['subtotal',
+                         'total', 'amount_remaining'])
         else:
             # Créer une nouvelle facture
             purchase_order = receipt.purchase_order
-            
+
             invoice = Invoice.objects.create(
                 agence=purchase_order.agence,
                 supplier=purchase_order.supplier,
@@ -734,7 +719,7 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
                 amount_paid=Decimal('0'),
                 amount_remaining=total_reception
             )
-        
+
         # Créer les lignes de facture
         items_created = 0
         for item in receipt.items.all():
@@ -752,7 +737,7 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
                     tax_rate=Decimal('0'),
                 )
                 items_created += 1
-        
+
         # Recalculer les totaux
         invoice.refresh_from_db()
         subtotal = sum(item.total for item in invoice.items.all())
@@ -760,7 +745,7 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         invoice.total = subtotal
         invoice.amount_remaining = subtotal - invoice.amount_paid
         invoice.save()
-        
+
         serializer = InvoiceSerializer(invoice, context={'request': request})
         return Response({
             'success': True,
@@ -781,7 +766,7 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         ✅ Récupère les totaux de la réception
         """
         receipt = self.get_object()
-        
+
         return Response({
             'receipt_id': receipt.id,
             'receipt_number': receipt.receipt_number,
@@ -805,16 +790,16 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         """
         purchase_order_id = request.query_params.get('purchase_order')
         supplier_id = request.query_params.get('supplier')
-        
+
         queryset = self.get_queryset().filter(
             invoices__isnull=True  # Pas encore de facture
         )
-        
+
         if purchase_order_id:
             queryset = queryset.filter(purchase_order_id=purchase_order_id)
         if supplier_id:
             queryset = queryset.filter(purchase_order__supplier_id=supplier_id)
-        
+
         # Filtrer les réceptions avec un total > 0
         result = []
         for receipt in queryset:
@@ -830,7 +815,7 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
                     'total_received_amount': str(receipt.total_received_amount),
                     'items_count': receipt.items_count
                 })
-        
+
         return Response(result)
 
     # ============================================================
@@ -843,15 +828,15 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         ✅ Récupère les statistiques des réceptions
         """
         queryset = self.get_queryset()
-        
+
         total_receipts = queryset.count()
         total_received_amount = 0
         total_items = 0
-        
+
         for receipt in queryset:
             total_received_amount += receipt.total_received_amount
             total_items += receipt.items_count
-        
+
         return Response({
             'total_receipts': total_receipts,
             'total_received_amount': str(total_received_amount),
@@ -870,78 +855,32 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
+
         receipt = serializer.save()
-        
+
         # ✅ Générer automatiquement la facture
         try:
             if receipt.total_received_amount > 0:
                 # Appeler generate_invoice
-                invoice_response = self.generate_invoice(request, pk=receipt.id)
+                invoice_response = self.generate_invoice(
+                    request, pk=receipt.id)
                 if invoice_response.status_code == 201:
                     invoice_data = invoice_response.data
-                    print(f"✅ Facture auto-générée: {invoice_data.get('invoice', {}).get('invoice_number')}")
+                    print(
+                        f"✅ Facture auto-générée: {invoice_data.get('invoice', {}).get('invoice_number')}")
         except Exception as e:
             print(f"⚠️ Erreur génération auto-facture: {str(e)}")
-        
+
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
 
+# purchases/views.py - PurchaseReceiptViewSet COMPLET CORRIGÉ
 
 # purchases/views.py - PurchaseReceiptViewSet COMPLET CORRIGÉ
 
-from rest_framework import viewsets, generics, status
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Sum, Count
-from django.utils import timezone
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
-from decimal import Decimal
-from .models import *
-from .serializers import *
-from users.permissions import HasAgenceAccess
-from inventaire.models import StockMovement, Warehouse
 
 # purchases/views.py - PurchaseReceiptViewSet COMPLET CORRIGÉ
-
-from rest_framework import viewsets, generics, status
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Sum, Count
-from django.utils import timezone
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
-from decimal import Decimal
-from .models import *
-from .serializers import *
-from users.permissions import HasAgenceAccess
-from inventaire.models import StockMovement, Warehouse
-
-
-
-# purchases/views.py - PurchaseReceiptViewSet COMPLET CORRIGÉ
-
-from rest_framework import viewsets, generics, status
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Sum, Count
-from django.utils import timezone
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
-from decimal import Decimal
-from datetime import timedelta
-from .models import *
-from .serializers import *
-from users.permissions import HasAgenceAccess
-from inventaire.models import StockMovement, Warehouse
 
 
 class PurchaseReceiptViewSet(viewsets.ModelViewSet):
@@ -978,7 +917,7 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         try:
             # ✅ Récupérer la réception avec le pk passé en paramètre
             receipt = self.get_object()
-            
+
             if not receipt:
                 return Response(
                     {'error': f'Réception avec ID {pk} non trouvée'},
@@ -1016,7 +955,8 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
                         'variant': order_item.variant,
                         'discount_rate': order_item.discount_rate or Decimal('0'),
                     })
-                    print(f"  - {order_item.product.name}: {qty} x {price} = {total_ligne}")
+                    print(
+                        f"  - {order_item.product.name}: {qty} x {price} = {total_ligne}")
 
             print(f"💰 TOTAL RÉCEPTION: {total_reception}")
 
@@ -1071,7 +1011,8 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
                     discount_rate=item_data['discount_rate'],
                     tax_rate=Decimal('0'),
                 )
-                print(f"  ➕ Ligne: {item_data['product'].name} - {item_data['unit_price']} x {item_data['quantity']}")
+                print(
+                    f"  ➕ Ligne: {item_data['product'].name} - {item_data['unit_price']} x {item_data['quantity']}")
 
             # ✅ RECALCULER LES TOTAUX
             invoice.refresh_from_db()
@@ -1079,11 +1020,14 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
             invoice.subtotal = subtotal
             invoice.total = subtotal
             invoice.amount_remaining = subtotal - invoice.amount_paid
-            invoice.save(update_fields=['subtotal', 'total', 'amount_remaining'])
+            invoice.save(update_fields=['subtotal',
+                         'total', 'amount_remaining'])
 
-            print(f"✅ FACTURE FINALISÉE: {invoice.invoice_number} - Total: {invoice.total}")
+            print(
+                f"✅ FACTURE FINALISÉE: {invoice.invoice_number} - Total: {invoice.total}")
 
-            serializer = InvoiceSerializer(invoice, context={'request': request})
+            serializer = InvoiceSerializer(
+                invoice, context={'request': request})
             return Response({
                 'success': True,
                 'message': f'Facture {invoice.invoice_number} créée avec succès',
@@ -1177,18 +1121,19 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
                 # Créer un faux request avec le bon pk
                 from django.test import RequestFactory
                 factory = RequestFactory()
-                
+
                 # ✅ PASSER pk DANS L'URL ET DANS self.kwargs
-                fake_request = factory.post(f'/purchase-receipts/{receipt.id}/generate_invoice/')
+                fake_request = factory.post(
+                    f'/purchase-receipts/{receipt.id}/generate_invoice/')
                 fake_request.user = request.user
                 fake_request.data = {}
-                
+
                 # ✅ Définir self.kwargs pour que get_object fonctionne
                 self.kwargs = {'pk': receipt.id}
-                
+
                 # Appeler generate_invoice
                 response = self.generate_invoice(fake_request, pk=receipt.id)
-                
+
                 if response.status_code == 201:
                     print(f"✅ Facture auto-générée avec succès")
                     # Ajouter l'info de la facture dans la réponse
@@ -1267,41 +1212,39 @@ class PurchaseReceiptViewSet(viewsets.ModelViewSet):
         return Response(result)
 
 
-
-
 class InvoiceViewSet(viewsets.ModelViewSet):
     """ViewSet pour les factures"""
     permission_classes = [IsAuthenticated, HasAgenceAccess]
     queryset = Invoice.objects.all()
-    
+
     def get_queryset(self):
         user = self.request.user
         if user.est_pdg() or user.est_drh():
             return Invoice.objects.all()
         agences_ids = user.get_agences().values_list('id', flat=True)
         return Invoice.objects.filter(agence_id__in=agences_ids)
-    
+
     def get_serializer_class(self):
         if self.action == 'create':
             return InvoiceCreateSerializer
         return InvoiceSerializer
-    
+
     @action(detail=True, methods=['post'])
     def add_payment(self, request, pk=None):
         """Ajouter un paiement à une facture"""
         invoice = self.get_object()
-        
+
         serializer = PaymentCreateSerializer(
             data=request.data,
             context={'request': request}
         )
-        
+
         if serializer.is_valid():
             payment = serializer.save()
             return Response(PaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
-        
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     @action(detail=True, methods=['get'])
     def payments(self, request, pk=None):
         """Récupérer les paiements d'une facture"""
@@ -1309,22 +1252,22 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         payments = invoice.payments.all()
         serializer = PaymentSerializer(payments, many=True)
         return Response(serializer.data)
-    
+
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         """Annuler une facture"""
         invoice = self.get_object()
-        
+
         if invoice.amount_paid > 0:
             return Response(
                 {'error': 'Impossible d\'annuler une facture qui a des paiements'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         invoice.status = 'cancelled'
         invoice.is_active = False
         invoice.save()
-        
+
         return Response(InvoiceSerializer(invoice).data)
 
 
@@ -1333,14 +1276,14 @@ class PaymentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasAgenceAccess]
     queryset = Payment.objects.all()
     serializer_class = PaymentSerializer
-    
+
     def get_queryset(self):
         user = self.request.user
         if user.est_pdg() or user.est_drh():
             return Payment.objects.all()
         agences_ids = user.get_agences().values_list('id', flat=True)
         return Payment.objects.filter(agence_id__in=agences_ids)
-    
+
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
@@ -1348,16 +1291,16 @@ class PaymentViewSet(viewsets.ModelViewSet):
 class InvoiceStatsView(generics.GenericAPIView):
     """Statistiques des factures"""
     permission_classes = [IsAuthenticated, HasAgenceAccess]
-    
+
     def get(self, request):
         user = request.user
-        
+
         if user.est_pdg() or user.est_drh():
             invoices = Invoice.objects.all()
         else:
             agences_ids = user.get_agences().values_list('id', flat=True)
             invoices = Invoice.objects.filter(agence_id__in=agences_ids)
-        
+
         stats = {
             'total_invoices': invoices.count(),
             'total_amount': invoices.aggregate(total=Sum('total'))['total'] or 0,
@@ -1369,27 +1312,27 @@ class InvoiceStatsView(generics.GenericAPIView):
             'overdue': invoices.filter(status='overdue').count(),
             'cancelled': invoices.filter(status='cancelled').count(),
         }
-        
+
         return Response(stats)
 
 
 class PaymentStatsView(generics.GenericAPIView):
     """Statistiques des paiements"""
     permission_classes = [IsAuthenticated, HasAgenceAccess]
-    
+
     def get(self, request):
         user = request.user
-        
+
         if user.est_pdg() or user.est_drh():
             payments = Payment.objects.all()
         else:
             agences_ids = user.get_agences().values_list('id', flat=True)
             payments = Payment.objects.filter(agence_id__in=agences_ids)
-        
+
         today = timezone.now().date()
         week_start = today - timezone.timedelta(days=7)
         month_start = today - timezone.timedelta(days=30)
-        
+
         stats = {
             'total': payments.count(),
             'amount_today': payments.filter(payment_date=today).aggregate(total=Sum('amount'))['total'] or 0,
@@ -1399,7 +1342,7 @@ class PaymentStatsView(generics.GenericAPIView):
             'completed': payments.filter(status='completed').count(),
             'failed': payments.filter(status='failed').count(),
         }
-        
+
         return Response(stats)
 
 
@@ -1407,7 +1350,7 @@ class InvoicePaymentsView(generics.ListAPIView):
     """Liste des paiements d'une facture"""
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated, HasAgenceAccess]
-    
+
     def get_queryset(self):
         invoice_id = self.kwargs['pk']
         return Payment.objects.filter(invoice_id=invoice_id)

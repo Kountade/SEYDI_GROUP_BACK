@@ -1124,6 +1124,9 @@ class Invoice(models.Model):
         """Calcule le total des lignes de facture"""
         return self.items.aggregate(total=models.Sum('total'))['total'] or 0
 
+
+# purchases/models.py
+
 class Payment(models.Model):
     """Paiement d'une facture"""
     
@@ -1182,7 +1185,7 @@ class Payment(models.Model):
         related_name='validated_payments'
     )
     
-    # ✅ Lien vers la trésorerie
+    # Lien vers la trésorerie
     caisse = models.ForeignKey(
         'tresorerie.Caisse',
         on_delete=models.SET_NULL,
@@ -1254,6 +1257,7 @@ class Payment(models.Model):
         return f"{self.payment_number} - {self.invoice.invoice_number} - {self.amount}"
     
     def save(self, *args, **kwargs):
+        # Générer le numéro de paiement
         if not self.payment_number:
             last_payment = Payment.objects.order_by('-id').first()
             if last_payment:
@@ -1274,14 +1278,64 @@ class Payment(models.Model):
                 status='completed'
             ).aggregate(total=models.Sum('amount'))['total'] or 0
             self.invoice.save()
+            
+            # ✅ CRÉER AUTOMATIQUEMENT LE MOUVEMENT DE TRÉSORERIE
+            try:
+                if not self.mouvement_tresorerie:
+                    self.create_treasury_movement()
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Erreur création mouvement trésorerie: {str(e)}")
     
     def create_treasury_movement(self):
-        """Crée un mouvement de trésorerie pour ce paiement"""
-        from tresorerie.models import MouvementTresorerie
+        """
+        Crée un mouvement de trésorerie pour ce paiement
+        """
+        from tresorerie.models import MouvementTresorerie, Caisse
         
+        # ✅ Vérifier si le mouvement existe déjà
         if self.mouvement_tresorerie:
             return self.mouvement_tresorerie
         
+        # ✅ Récupérer la caisse ou le compte
+        caisse = self.caisse
+        compte = self.compte_bancaire
+        
+        # ✅ Fallback : prendre la caisse par défaut de l'agence
+        if not caisse and not compte:
+            caisse = Caisse.objects.filter(
+                agence=self.agence,
+                is_default=True,
+                is_active=True
+            ).first()
+            
+            # Si pas de caisse par défaut, prendre la première caisse active
+            if not caisse:
+                caisse = Caisse.objects.filter(
+                    agence=self.agence,
+                    is_active=True
+                ).first()
+        
+        # ✅ Vérifier qu'on a bien une destination
+        if not caisse and not compte:
+            raise ValueError(
+                f"Aucune caisse ou compte bancaire trouvé pour l'agence {self.agence.nom}. "
+                "Veuillez configurer une caisse par défaut."
+            )
+        
+        # ✅ Mapping du mode de paiement
+        mode_mapping = {
+            'cash': 'especes',
+            'bank_transfer': 'virement',
+            'check': 'cheque',
+            'card': 'carte',
+            'mobile_money': 'mobile_money',
+            'other': 'autre',
+        }
+        mode_paiement = mode_mapping.get(self.payment_method, 'virement')
+        
+        # ✅ CRÉER LE MOUVEMENT DE TRÉSORERIE
         mouvement = MouvementTresorerie.objects.create(
             type_mouvement='decaissement',
             agence=self.agence,
@@ -1289,20 +1343,22 @@ class Payment(models.Model):
             source_id=self.id,
             source_reference=self.payment_number,
             montant=self.amount,
-            mode_paiement=self.payment_method,
-            caisse=self.caisse,
-            compte_bancaire=self.compte_bancaire,
+            mode_paiement=mode_paiement,
+            caisse=caisse,
+            compte_bancaire=compte,
             date_mouvement=timezone.now(),
-            date_valeur=self.payment_date,
-            status='effectue',
+            date_valeur=self.payment_date or timezone.now().date(),
+            status='effectue',  # ✅ Statut effectué pour mettre à jour le solde
             libelle=f"Paiement facture {self.invoice.invoice_number} - {self.payment_number}",
+            notes=f"{self.notes or ''} - Paiement fournisseur {self.invoice.supplier.company_name}",
             created_by=self.created_by
         )
         
+        # ✅ Sauvegarder la référence
         self.mouvement_tresorerie = mouvement
         self.save(update_fields=['mouvement_tresorerie'])
+        
         return mouvement
-
 
 # purchases/models.py - Modèle InvoiceItem COMPLET
 # purchases/models.py - InvoiceItem

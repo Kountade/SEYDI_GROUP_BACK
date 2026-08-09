@@ -12,6 +12,8 @@ from comptabilite.models import PlanComptable, Ecriture, LigneEcriture
 # 1. CAISSES
 # ============================================================
 
+# tresorerie/models.py - Modèle Caisse avec gestion améliorée de is_default
+
 class Caisse(models.Model):
     """
     Caisse physique ou virtuelle
@@ -68,9 +70,41 @@ class Caisse(models.Model):
         return f"{self.code} - {self.nom} ({self.agence.nom})"
 
     def save(self, *args, **kwargs):
+        # ✅ Si cette caisse est marquée comme par défaut
         if self.is_default:
-            Caisse.objects.filter(agence=self.agence,
-                                  is_default=True).update(is_default=False)
+            # Retirer le statut par défaut des autres caisses de la même agence
+            Caisse.objects.filter(
+                agence=self.agence,
+                is_default=True
+            ).exclude(pk=self.pk).update(is_default=False)
+        
+        # ✅ Si cette caisse perd son statut par défaut ET qu'il n'y a pas d'autre caisse par défaut
+        # ET qu'il existe d'autres caisses actives dans la même agence
+        if not self.is_default:
+            # Vérifier s'il existe une autre caisse par défaut
+            has_other_default = Caisse.objects.filter(
+                agence=self.agence,
+                is_default=True
+            ).exclude(pk=self.pk).exists()
+            
+            # S'il n'y a pas d'autre caisse par défaut, mais qu'il y a d'autres caisses actives
+            if not has_other_default:
+                other_active_caisse = Caisse.objects.filter(
+                    agence=self.agence,
+                    is_active=True
+                ).exclude(pk=self.pk).first()
+                
+                # Si une autre caisse active existe, la définir comme par défaut
+                if other_active_caisse:
+                    other_active_caisse.is_default = True
+                    other_active_caisse.save(update_fields=['is_default'])
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(
+                        f"✅ Caisse '{other_active_caisse.nom}' définie comme par défaut "
+                        f"car '{self.nom}' a perdu ce statut"
+                    )
+        
         super().save(*args, **kwargs)
 
     @property
@@ -147,6 +181,8 @@ class CompteBancaire(models.Model):
 # 3. MOUVEMENTS DE TRÉSORERIE
 # ============================================================
 
+# tresorerie/models.py
+
 class MouvementTresorerie(models.Model):
     """
     Mouvement de trésorerie (entrée ou sortie d'argent)
@@ -166,6 +202,7 @@ class MouvementTresorerie(models.Model):
         ('ecriture', 'Écriture comptable'),
         ('salaire', 'Salaire'),
         ('frais', 'Frais'),
+        ('payment', 'Paiement fournisseur'),  # ✅ AJOUT
         ('caisse', 'Caisse'),
         ('compte_bancaire', 'Compte bancaire'),
         ('autre', 'Autre'),
@@ -245,8 +282,8 @@ class MouvementTresorerie(models.Model):
     libelle = models.CharField(max_length=200, verbose_name="Libellé")
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
 
-    # Lien vers l'écriture comptable (EXISTANT)
-    ecriture = models.ForeignKey(Ecriture, on_delete=models.SET_NULL, null=True, blank=True,
+    # Lien vers l'écriture comptable
+    ecriture = models.ForeignKey('comptabilite.Ecriture', on_delete=models.SET_NULL, null=True, blank=True,
                                  related_name='mouvements_tresorerie', verbose_name="Écriture comptable")
 
     # Création et validation
@@ -275,6 +312,7 @@ class MouvementTresorerie(models.Model):
         return f"{self.reference} - {self.type_mouvement} - {self.montant:,.0f} GNF"
 
     def save(self, *args, **kwargs):
+        # ✅ Génération automatique de la référence
         if not self.reference:
             from datetime import datetime
             prefix = f"TRES{datetime.now().strftime('%Y%m')}"
@@ -296,26 +334,87 @@ class MouvementTresorerie(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
-        # Mettre à jour les soldes si mouvement effectué
-        if self.status == 'effectue' and not self.pk:
-            self._mettre_a_jour_soldes()
+        # ✅ Vérifier qu'on a une destination
+        if not self.caisse and not self.compte_bancaire:
+            raise ValidationError(
+                "Un mouvement doit avoir une caisse ou un compte bancaire"
+            )
+
+        # ✅ Mettre à jour les soldes si le mouvement est effectué
+        # On le fait AVANT la sauvegarde pour que les soldes soient à jour
+        if self.status == 'effectue':
+            # Si c'est une création ou un changement de statut vers 'effectue'
+            if not self.pk:
+                # Nouveau mouvement
+                self._mettre_a_jour_soldes()
+            else:
+                # Mouvement existant - vérifier si le statut a changé
+                try:
+                    old = MouvementTresorerie.objects.get(pk=self.pk)
+                    if old.status != 'effectue' and self.status == 'effectue':
+                        self._mettre_a_jour_soldes()
+                    elif old.status == 'effectue' and self.status != 'effectue':
+                        # Inverser les soldes si on passe de effectue à autre chose
+                        self._inverser_soldes()
+                except MouvementTresorerie.DoesNotExist:
+                    pass
 
         super().save(*args, **kwargs)
 
     def _mettre_a_jour_soldes(self):
-        """Met à jour les soldes des caisses/comptes bancaires"""
+        """
+        Met à jour les soldes des caisses/comptes bancaires
+        """
+        try:
+            if self.caisse:
+                if self.type_mouvement == 'encaissement':
+                    self.caisse.solde_actuel += self.montant
+                elif self.type_mouvement == 'decaissement':
+                    self.caisse.solde_actuel -= self.montant
+                self.caisse.save(update_fields=['solde_actuel', 'updated_at'])
+                
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"✅ Caisse {self.caisse.nom} mise à jour: "
+                    f"{self.caisse.solde_actuel} ({(self.type_mouvement)} de {self.montant})"
+                )
+
+            if self.compte_bancaire:
+                if self.type_mouvement == 'encaissement':
+                    self.compte_bancaire.solde_actuel += self.montant
+                elif self.type_mouvement == 'decaissement':
+                    self.compte_bancaire.solde_actuel -= self.montant
+                self.compte_bancaire.save(update_fields=['solde_actuel', 'updated_at'])
+                
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"✅ Compte {self.compte_bancaire.nom} mis à jour: "
+                    f"{self.compte_bancaire.solde_actuel} ({(self.type_mouvement)} de {self.montant})"
+                )
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"❌ Erreur mise à jour soldes: {str(e)}")
+            raise ValidationError(f"Erreur lors de la mise à jour des soldes: {str(e)}")
+
+    def _inverser_soldes(self):
+        """
+        Inverse les soldes (quand un mouvement est annulé)
+        """
         if self.caisse:
             if self.type_mouvement == 'encaissement':
-                self.caisse.solde_actuel += self.montant
-            elif self.type_mouvement == 'decaissement':
                 self.caisse.solde_actuel -= self.montant
+            elif self.type_mouvement == 'decaissement':
+                self.caisse.solde_actuel += self.montant
             self.caisse.save()
 
         if self.compte_bancaire:
             if self.type_mouvement == 'encaissement':
-                self.compte_bancaire.solde_actuel += self.montant
-            elif self.type_mouvement == 'decaissement':
                 self.compte_bancaire.solde_actuel -= self.montant
+            elif self.type_mouvement == 'decaissement':
+                self.compte_bancaire.solde_actuel += self.montant
             self.compte_bancaire.save()
 
     @property
@@ -329,7 +428,6 @@ class MouvementTresorerie(models.Model):
     @property
     def est_transfert(self):
         return self.type_mouvement == 'transfert'
-
 
 # ============================================================
 # 4. FRAIS ET DÉPENSES
@@ -714,7 +812,7 @@ class TresorerieJournaliere(models.Model):
     """
     Suivi journalier de la trésorerie
     """
-    date = models.DateField(verbose_name="Date")  
+    date = models.DateField(unique=True, verbose_name="Date")
     agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='tresorerie_journaliere',
                                verbose_name="Agence")
 

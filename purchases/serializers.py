@@ -321,18 +321,11 @@ class PurchaseReceiptSerializer(serializers.ModelSerializer):
 
 # purchases/serializers.py
 
-from rest_framework import serializers
-from django.db import transaction
-from django.utils import timezone
-from django.db import models
-from .models import *
-from produits.serializers import ProductListSerializer, ProductVariantSerializer
-from users.serializers import UserSerializer, AgenceSimpleSerializer
-from inventaire.serializers import WarehouseSerializer
 
 # purchases/serializers.py - PurchaseReceiptCreateSerializer COMPLET CORRIGÉ
 
 # purchases/serializers.py - PurchaseReceiptCreateSerializer COMPLET
+
 
 class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
     items = serializers.ListField(
@@ -392,7 +385,8 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 })
 
             try:
-                order_item = PurchaseOrderItem.objects.get(id=item['order_item'])
+                order_item = PurchaseOrderItem.objects.get(
+                    id=item['order_item'])
                 item['order_item_obj'] = order_item
 
                 remaining = order_item.quantity_ordered - order_item.quantity_received
@@ -408,7 +402,8 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                     from datetime import datetime
                     try:
                         if isinstance(expiry_date, str):
-                            expiry_date = datetime.strptime(expiry_date, '%Y-%m-%d').date()
+                            expiry_date = datetime.strptime(
+                                expiry_date, '%Y-%m-%d').date()
                         if expiry_date < datetime.now().date():
                             raise serializers.ValidationError({
                                 f'items[{idx}]':
@@ -636,7 +631,6 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 f"Erreur lors de la mise à jour du stock: {str(e)}")
 
 
-
 class PurchaseReceiptDetailSerializer(serializers.ModelSerializer):
     items = PurchaseReceiptItemSerializer(many=True, read_only=True)
     received_by_name = serializers.CharField(
@@ -783,7 +777,7 @@ class PurchaseOrderStatsSerializer(serializers.Serializer):
 
 class InvoiceItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    
+
     class Meta:
         model = InvoiceItem
         fields = '__all__'
@@ -791,10 +785,13 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
 
 # purchases/serializers.py - Assurez-vous que PaymentSerializer est importé
 
+
 class PaymentSerializer(serializers.ModelSerializer):
-    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.email', read_only=True)
-    
+    invoice_number = serializers.CharField(
+        source='invoice.invoice_number', read_only=True)
+    created_by_name = serializers.CharField(
+        source='created_by.email', read_only=True)
+
     class Meta:
         model = Payment
         fields = '__all__'
@@ -804,15 +801,17 @@ class PaymentSerializer(serializers.ModelSerializer):
 # purchases/serializers.py - Corrigez InvoiceSerializer
 
 class InvoiceSerializer(serializers.ModelSerializer):
-    supplier_name = serializers.CharField(source='supplier.company_name', read_only=True)
+    supplier_name = serializers.CharField(
+        source='supplier.company_name', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
     items = InvoiceItemSerializer(many=True, read_only=True)
     payments = PaymentSerializer(many=True, read_only=True)
     payment_progress = serializers.FloatField(read_only=True)
     is_fully_paid = serializers.BooleanField(read_only=True)
     is_overdue = serializers.BooleanField(read_only=True)
-    
+
     class Meta:
         model = Invoice
         fields = '__all__'
@@ -820,8 +819,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
 
 
 class InvoiceCreateSerializer(serializers.ModelSerializer):
-    items = InvoiceItemSerializer(many=True, required=False)  # ✅ Rendre optionnel pour la création auto
-    
+    # ✅ Rendre optionnel pour la création auto
+    items = InvoiceItemSerializer(many=True, required=False)
+
     class Meta:
         model = Invoice
         fields = [
@@ -830,25 +830,33 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
             'shipping_cost', 'notes', 'internal_notes', 'items'
         ]
         read_only_fields = ('invoice_number', 'created_at', 'updated_at')
-    
+
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
         invoice = Invoice.objects.create(**validated_data)
-        
+
         # Si des items sont fournis, les créer
         for item_data in items_data:
             InvoiceItem.objects.create(invoice=invoice, **item_data)
-        
+
         # ✅ Recalculer les totaux à partir des items
         invoice.subtotal = sum(item.subtotal for item in invoice.items.all())
-        invoice.tax_total = sum(item.tax_amount for item in invoice.items.all())
-        invoice.total = invoice.subtotal + invoice.tax_total - invoice.discount + invoice.shipping_cost
+        invoice.tax_total = sum(
+            item.tax_amount for item in invoice.items.all())
+        invoice.total = invoice.subtotal + invoice.tax_total - \
+            invoice.discount + invoice.shipping_cost
         invoice.amount_remaining = invoice.total
         invoice.save()
-        
+
         return invoice
+# purchases/serializers.py
+
 
 class PaymentCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour la création d'un paiement
+    """
+
     class Meta:
         model = Payment
         fields = [
@@ -856,49 +864,89 @@ class PaymentCreateSerializer(serializers.ModelSerializer):
             'caisse', 'compte_bancaire', 'reference_number', 'notes'
         ]
         read_only_fields = ('payment_number', 'created_at', 'updated_at')
-    
+
     def validate(self, data):
+        """
+        Validation des données
+        """
         invoice = data.get('invoice')
         amount = data.get('amount')
-        
+
+        # ✅ Vérifier que la facture existe et est valide
+        if not invoice:
+            raise serializers.ValidationError({
+                'invoice': 'La facture est obligatoire'
+            })
+
+        # ✅ Vérifier que le montant est valide
+        if amount <= 0:
+            raise serializers.ValidationError({
+                'amount': 'Le montant doit être supérieur à 0'
+            })
+
+        # ✅ Vérifier que le montant ne dépasse pas le montant restant
         if amount > invoice.amount_remaining:
-            raise serializers.ValidationError(
-                f"Le montant ({amount}) dépasse le montant restant ({invoice.amount_remaining})"
-            )
-        
-        # Vérifier qu'une destination est spécifiée
+            raise serializers.ValidationError({
+                'amount': f"Le montant ({amount}) dépasse le montant restant ({invoice.amount_remaining})"
+            })
+
+        # ✅ Vérifier qu'une destination est spécifiée
         caisse = data.get('caisse')
         compte = data.get('compte_bancaire')
-        
+
         if not caisse and not compte:
-            raise serializers.ValidationError(
-                "Veuillez spécifier une caisse ou un compte bancaire"
-            )
-        
+            raise serializers.ValidationError({
+                'caisse': 'Veuillez spécifier une caisse ou un compte bancaire'
+            })
+
         if caisse and compte:
-            raise serializers.ValidationError(
-                "Veuillez choisir une seule destination (caisse ou compte)"
-            )
-        
+            raise serializers.ValidationError({
+                'caisse': 'Veuillez choisir une seule destination (caisse ou compte)'
+            })
+
+        # ✅ Vérifier que la destination appartient à la même agence
+        if caisse and caisse.agence != invoice.agence:
+            raise serializers.ValidationError({
+                'caisse': 'La caisse doit appartenir à la même agence que la facture'
+            })
+
+        if compte and compte.agence != invoice.agence:
+            raise serializers.ValidationError({
+                'compte_bancaire': 'Le compte bancaire doit appartenir à la même agence que la facture'
+            })
+
         return data
-    
+
     def create(self, validated_data):
+        """
+        Création d'un paiement
+        """
         invoice = validated_data.get('invoice')
         amount = validated_data.get('amount')
-        
-        # Créer le paiement
+        request = self.context.get('request')
+
+        # ✅ Récupérer l'agence depuis la facture
+        agence = invoice.agence
+
+        # ✅ Créer le paiement
         payment = Payment.objects.create(
-            **validated_data,
-            payment_number=f"PAY{str(Payment.objects.count() + 1).zfill(6)}",
-            created_by=self.context['request'].user,
+            invoice=invoice,
+            agence=agence,
+            amount=amount,
+            payment_method=validated_data.get(
+                'payment_method', 'bank_transfer'),
+            payment_date=validated_data.get(
+                'payment_date', timezone.now().date()),
+            caisse=validated_data.get('caisse'),
+            compte_bancaire=validated_data.get('compte_bancaire'),
+            reference_number=validated_data.get('reference_number', ''),
+            notes=validated_data.get('notes', ''),
+            created_by=request.user if request else None,
             status='completed'
         )
-        
-        # Mettre à jour la facture
-        invoice.amount_paid += amount
-        invoice.save()
-        
-        # Créer le mouvement de trésorerie
-        payment.create_treasury_movement()
-        
+
+        # ✅ La méthode save() du Payment va automatiquement :
+        # 1. Mettre à jour le montant payé de la facture
+        # 2. Créer le mouvement de trésorerie via create_treasury_movement()
+
         return payment
