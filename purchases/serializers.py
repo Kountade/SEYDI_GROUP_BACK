@@ -125,7 +125,8 @@ class PurchaseOrderListSerializer(serializers.ModelSerializer):
                 'quantity_received': item.quantity_received,
                 'unit_price': item.unit_price,
                 'total': item.total,
-                'remaining_quantity': item.remaining_quantity
+                'remaining_quantity': item.remaining_quantity,
+                'is_fully_received': item.is_fully_received
             }
             for item in obj.items.all()
         ]
@@ -316,6 +317,23 @@ class PurchaseReceiptSerializer(serializers.ModelSerializer):
         return obj.purchase_order.order_number if obj.purchase_order else None
 
 
+# purchases/serializers.py - PurchaseReceiptCreateSerializer COMPLET
+
+# purchases/serializers.py
+
+from rest_framework import serializers
+from django.db import transaction
+from django.utils import timezone
+from django.db import models
+from .models import *
+from produits.serializers import ProductListSerializer, ProductVariantSerializer
+from users.serializers import UserSerializer, AgenceSimpleSerializer
+from inventaire.serializers import WarehouseSerializer
+
+# purchases/serializers.py - PurchaseReceiptCreateSerializer COMPLET CORRIGÉ
+
+# purchases/serializers.py - PurchaseReceiptCreateSerializer COMPLET
+
 class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
     items = serializers.ListField(
         child=serializers.DictField(),
@@ -336,7 +354,7 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
         model = PurchaseReceipt
         fields = [
             'purchase_order', 'notes', 'items', 'costs', 'waybill_ids',
-            'caisse_destination', 'compte_destination'  # ajout
+            'caisse_destination', 'compte_destination'
         ]
         read_only_fields = ('receipt_number', 'created_at', 'received_by')
 
@@ -374,18 +392,42 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 })
 
             try:
-                order_item = PurchaseOrderItem.objects.get(
-                    id=item['order_item'])
+                order_item = PurchaseOrderItem.objects.get(id=item['order_item'])
                 item['order_item_obj'] = order_item
 
-                if order_item.remaining_quantity < quantity:
+                remaining = order_item.quantity_ordered - order_item.quantity_received
+                if quantity > remaining:
                     raise serializers.ValidationError({
-                        f'items[{idx}]': f"La quantité reçue ({quantity}) dépasse la quantité restante ({order_item.remaining_quantity})"
+                        f'items[{idx}]':
+                        f"Impossible de recevoir {quantity} unités. "
+                        f"Quantité restante: {remaining}"
                     })
+
+                expiry_date = item.get('expiry_date')
+                if expiry_date:
+                    from datetime import datetime
+                    try:
+                        if isinstance(expiry_date, str):
+                            expiry_date = datetime.strptime(expiry_date, '%Y-%m-%d').date()
+                        if expiry_date < datetime.now().date():
+                            raise serializers.ValidationError({
+                                f'items[{idx}]':
+                                "La date d'expiration ne peut pas être dans le passé"
+                            })
+                    except ValueError:
+                        raise serializers.ValidationError({
+                            f'items[{idx}]':
+                            "Format de date invalide (YYYY-MM-DD)"
+                        })
 
             except PurchaseOrderItem.DoesNotExist:
                 raise serializers.ValidationError({
-                    f'items[{idx}]': "Ligne de commande introuvable"
+                    f'items[{idx}]':
+                    f"Ligne de commande {item['order_item']} introuvable"
+                })
+            except Exception as e:
+                raise serializers.ValidationError({
+                    f'items[{idx}]': f"Erreur: {str(e)}"
                 })
 
         return value
@@ -398,27 +440,34 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 'purchase_order': 'La commande est obligatoire'
             })
 
-        if purchase_order.status not in ['confirmed', 'in_transit', 'partially_received']:
+        if purchase_order.status == 'draft':
             raise serializers.ValidationError({
-                'purchase_order': f'Cette commande (statut: {purchase_order.get_status_display()}) ne peut pas être réceptionnée'
+                'purchase_order':
+                'Cette commande est un brouillon. Elle doit être confirmée avant réception.'
             })
 
-        # Validation des destinations
-        caisse = data.get('caisse_destination')
-        compte = data.get('compte_destination')
-        if caisse and compte:
-            raise serializers.ValidationError(
-                "Choisissez une seule destination (caisse ou compte)."
-            )
-        # On peut aussi vérifier que la destination appartient à la même agence
-        agence = purchase_order.agence
-        if caisse and caisse.agence != agence:
+        if purchase_order.status == 'received':
             raise serializers.ValidationError({
-                'caisse_destination': 'La caisse doit appartenir à la même agence que la commande.'
+                'purchase_order': 'Cette commande est déjà entièrement reçue.'
             })
-        if compte and compte.agence != agence:
+
+        if purchase_order.status == 'cancelled':
             raise serializers.ValidationError({
-                'compte_destination': 'Le compte bancaire doit appartenir à la même agence que la commande.'
+                'purchase_order': 'Cette commande est annulée.'
+            })
+
+        if purchase_order.status not in ['confirmed', 'sent', 'in_transit', 'partially_received']:
+            raise serializers.ValidationError({
+                'purchase_order':
+                f'Cette commande (statut: {purchase_order.get_status_display()}) ne peut pas être réceptionnée.'
+            })
+
+        has_items_to_receive = any(
+            item.get('quantity', 0) > 0 for item in data.get('items', [])
+        )
+        if not has_items_to_receive:
+            raise serializers.ValidationError({
+                'items': 'Au moins un article doit être reçu'
             })
 
         return data
@@ -441,7 +490,7 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
         else:
             receipt_number = "REC000001"
 
-        # Créer la réception
+        # ✅ CRÉER LA RÉCEPTION
         receipt = PurchaseReceipt.objects.create(
             receipt_number=receipt_number,
             purchase_order=purchase_order,
@@ -449,25 +498,25 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
             received_by=self.context['request'].user,
             caisse_destination=validated_data.get('caisse_destination'),
             compte_destination=validated_data.get('compte_destination')
+            # auto_invoice est True par défaut
         )
 
-        # Ajouter les frais
-        for cost_data in costs_data:
-            ReceiptCost.objects.create(receipt=receipt, **cost_data)
+        print(f"✅ RÉCEPTION CRÉÉE: {receipt.receipt_number}")
 
-        # Associer les bons de transport
-        if waybill_ids:
-            # On suppose que receipt a un ManyToManyField vers Waybill
-            # Si ce n'est pas le cas, adaptez selon votre modèle
-            # receipt.waybills.set(waybill_ids)
-            pass
-
-        # Créer les lignes de réception
+        # ✅ CRÉER LES LIGNES DE RÉCEPTION
         for item_data in items_data:
             order_item = item_data.pop('order_item_obj')
             quantity_received = item_data['quantity']
 
-            PurchaseReceiptItem.objects.create(
+            remaining = order_item.quantity_ordered - order_item.quantity_received
+            if quantity_received > remaining:
+                raise serializers.ValidationError({
+                    'items':
+                    f"Impossible de recevoir {quantity_received} de "
+                    f"{order_item.product.name}. Quantité restante: {remaining}"
+                })
+
+            receipt_item = PurchaseReceiptItem.objects.create(
                 receipt=receipt,
                 order_item=order_item,
                 quantity=quantity_received,
@@ -476,14 +525,13 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 quality_notes=item_data.get('quality_notes', ''),
                 lot_number=item_data.get('lot_number', ''),
                 serial_numbers=item_data.get('serial_numbers', []),
-                expiry_date=item_data.get('expiry_date', None) or None,
+                expiry_date=item_data.get('expiry_date') or None,
                 notes=item_data.get('notes', '')
             )
 
             order_item.quantity_received += quantity_received
             order_item.save()
 
-            # Mettre à jour le stock
             self._update_stock_on_receipt(
                 purchase_order=purchase_order,
                 order_item=order_item,
@@ -491,35 +539,49 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                 item_data=item_data
             )
 
+        # Ajouter les frais
+        for cost_data in costs_data:
+            ReceiptCost.objects.create(receipt=receipt, **cost_data)
+
         # Mettre à jour le statut de la commande
-        all_items = purchase_order.items.all()
-        all_received = all(
-            item.quantity_received >= item.quantity_ordered
-            for item in all_items
-        )
+        self._update_order_status(purchase_order)
 
-        if all_received:
-            purchase_order.status = 'received'
-            purchase_order.received_date = timezone.now().date()
-        else:
-            purchase_order.status = 'partially_received'
-        purchase_order.save()
+        # ✅ FORCER LE RAFFRAÎCHISSEMENT
+        receipt.refresh_from_db()
 
-        # ============================================================
-        # CRÉER LE MOUVEMENT DE TRÉSORERIE (DÉCAISSEMENT)
-        # ============================================================
-        receipt.creer_mouvement_decaissement(self.context['request'].user)
+        print(f"✅ RÉCEPTION FINALISÉE: {receipt.receipt_number}")
+        print(f"📦 ITEMS: {receipt.items.count()}")
+        print(f"💰 TOTAL: {receipt.total_received_amount}")
 
         return receipt
 
+    def _update_order_status(self, purchase_order):
+        all_items = purchase_order.items.all()
+
+        fully_received = 0
+        partially_received = 0
+
+        for item in all_items:
+            if item.is_fully_received:
+                fully_received += 1
+            elif item.is_partially_received:
+                partially_received += 1
+
+        total_items = all_items.count()
+
+        if fully_received == total_items:
+            purchase_order.status = 'received'
+            purchase_order.received_date = timezone.now().date()
+        elif fully_received > 0 or partially_received > 0:
+            purchase_order.status = 'partially_received'
+
+        purchase_order.save()
+
     def _update_stock_on_receipt(self, purchase_order, order_item, quantity, item_data=None):
-        """Met à jour le stock dans l'entrepôt (code existant)"""
         from inventaire.models import StockMovement, Warehouse, Lot, StockAlert
-        from django.db import transaction
 
         try:
             with transaction.atomic():
-                # Récupérer l'entrepôt
                 if purchase_order.warehouse:
                     warehouse = purchase_order.warehouse
                 else:
@@ -534,8 +596,7 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                         raise Exception(
                             f"Aucun entrepôt configuré pour l'agence {purchase_order.agence.nom}")
 
-                # Créer un mouvement de stock
-                stock_movement = StockMovement.objects.create(
+                StockMovement.objects.create(
                     movement_type='in',
                     reference_type='purchase',
                     reference_id=purchase_order.id,
@@ -549,12 +610,10 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                     created_by=self.context['request'].user
                 )
 
-                # Mettre à jour le stock du produit
                 product = order_item.product
                 product.stock_quantity += quantity
                 product.save()
 
-                # Gestion des lots
                 if item_data and item_data.get('lot_number'):
                     lot, created = Lot.objects.get_or_create(
                         lot_number=item_data['lot_number'],
@@ -572,23 +631,10 @@ class PurchaseReceiptCreateSerializer(serializers.ModelSerializer):
                         lot.quantity += quantity
                         lot.save()
 
-                # Vérifier les alertes
-                if product.maximum_stock and product.stock_quantity > product.maximum_stock:
-                    StockAlert.objects.create(
-                        product=product,
-                        warehouse=warehouse,
-                        alert_type='overstock',
-                        current_quantity=product.stock_quantity,
-                        threshold=product.maximum_stock,
-                        message=f"Surstock pour {product.name}"
-                    )
-
-                return stock_movement
-
         except Exception as e:
             raise serializers.ValidationError(
                 f"Erreur lors de la mise à jour du stock: {str(e)}")
-# Dans serializers.py - Modifiez PurchaseReceiptDetailSerializer
+
 
 
 class PurchaseReceiptDetailSerializer(serializers.ModelSerializer):
@@ -731,3 +777,128 @@ class PurchaseOrderStatsSerializer(serializers.Serializer):
     late_orders = serializers.IntegerField()
     top_suppliers = serializers.ListField(child=serializers.DictField())
     monthly_spending = serializers.ListField(child=serializers.DictField())
+
+
+# purchases/serializers.py - Ajoutez ces sérializers
+
+class InvoiceItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    
+    class Meta:
+        model = InvoiceItem
+        fields = '__all__'
+        read_only_fields = ('subtotal', 'tax_amount', 'total', 'created_at')
+
+# purchases/serializers.py - Assurez-vous que PaymentSerializer est importé
+
+class PaymentSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.email', read_only=True)
+    
+    class Meta:
+        model = Payment
+        fields = '__all__'
+        read_only_fields = ('payment_number', 'created_at', 'updated_at')
+
+
+# purchases/serializers.py - Corrigez InvoiceSerializer
+
+class InvoiceSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source='supplier.company_name', read_only=True)
+    agence_nom = serializers.CharField(source='agence.nom', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    items = InvoiceItemSerializer(many=True, read_only=True)
+    payments = PaymentSerializer(many=True, read_only=True)
+    payment_progress = serializers.FloatField(read_only=True)
+    is_fully_paid = serializers.BooleanField(read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+    
+    class Meta:
+        model = Invoice
+        fields = '__all__'
+        read_only_fields = ('invoice_number', 'created_at', 'updated_at')
+
+
+class InvoiceCreateSerializer(serializers.ModelSerializer):
+    items = InvoiceItemSerializer(many=True, required=False)  # ✅ Rendre optionnel pour la création auto
+    
+    class Meta:
+        model = Invoice
+        fields = [
+            'supplier', 'agence', 'purchase_receipt', 'purchase_order',
+            'invoice_date', 'due_date', 'invoice_type', 'discount',
+            'shipping_cost', 'notes', 'internal_notes', 'items'
+        ]
+        read_only_fields = ('invoice_number', 'created_at', 'updated_at')
+    
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        invoice = Invoice.objects.create(**validated_data)
+        
+        # Si des items sont fournis, les créer
+        for item_data in items_data:
+            InvoiceItem.objects.create(invoice=invoice, **item_data)
+        
+        # ✅ Recalculer les totaux à partir des items
+        invoice.subtotal = sum(item.subtotal for item in invoice.items.all())
+        invoice.tax_total = sum(item.tax_amount for item in invoice.items.all())
+        invoice.total = invoice.subtotal + invoice.tax_total - invoice.discount + invoice.shipping_cost
+        invoice.amount_remaining = invoice.total
+        invoice.save()
+        
+        return invoice
+
+class PaymentCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Payment
+        fields = [
+            'invoice', 'amount', 'payment_method', 'payment_date',
+            'caisse', 'compte_bancaire', 'reference_number', 'notes'
+        ]
+        read_only_fields = ('payment_number', 'created_at', 'updated_at')
+    
+    def validate(self, data):
+        invoice = data.get('invoice')
+        amount = data.get('amount')
+        
+        if amount > invoice.amount_remaining:
+            raise serializers.ValidationError(
+                f"Le montant ({amount}) dépasse le montant restant ({invoice.amount_remaining})"
+            )
+        
+        # Vérifier qu'une destination est spécifiée
+        caisse = data.get('caisse')
+        compte = data.get('compte_bancaire')
+        
+        if not caisse and not compte:
+            raise serializers.ValidationError(
+                "Veuillez spécifier une caisse ou un compte bancaire"
+            )
+        
+        if caisse and compte:
+            raise serializers.ValidationError(
+                "Veuillez choisir une seule destination (caisse ou compte)"
+            )
+        
+        return data
+    
+    def create(self, validated_data):
+        invoice = validated_data.get('invoice')
+        amount = validated_data.get('amount')
+        
+        # Créer le paiement
+        payment = Payment.objects.create(
+            **validated_data,
+            payment_number=f"PAY{str(Payment.objects.count() + 1).zfill(6)}",
+            created_by=self.context['request'].user,
+            status='completed'
+        )
+        
+        # Mettre à jour la facture
+        invoice.amount_paid += amount
+        invoice.save()
+        
+        # Créer le mouvement de trésorerie
+        payment.create_treasury_movement()
+        
+        return payment

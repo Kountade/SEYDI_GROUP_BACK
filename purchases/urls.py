@@ -1,4 +1,5 @@
 # purchases/urls.py
+
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
@@ -20,6 +21,12 @@ router.register('purchase-alerts', views.PurchaseAlertViewSet,
                 basename='purchase-alerts')
 router.register('price-history', views.PurchasePriceHistoryViewSet,
                 basename='price-history')
+
+# ✅ Factures et Paiements Fournisseurs
+router.register('factures-fournisseur', views.InvoiceViewSet,
+                basename='factures-fournisseur')
+router.register('paiement-fournisseur', views.PaymentViewSet,
+                basename='paiement-fournisseur')
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -53,4 +60,10 @@ urlpatterns = [
 
     path('dashboard/', views.PurchaseDashboardView.as_view(),
          name='purchase-dashboard'),
+
+    # ✅ STATS
+    path('factures-fournisseur/stats/',
+         views.InvoiceStatsView.as_view(), name='factures-fournisseur-stats'),
+    path('paiement-fournisseur/stats/',
+         views.PaymentStatsView.as_view(), name='paiement-fournisseur-stats'),
 ]
