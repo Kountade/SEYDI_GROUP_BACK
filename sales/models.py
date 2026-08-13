@@ -375,6 +375,7 @@ class Facture(models.Model):
             return (timezone.now().date() - self.date_echeance).days
         return 0
 
+# sales/models.py - Modèle Paiement COMPLET
 
 class Paiement(models.Model):
     """Paiement d'une facture"""
@@ -396,32 +397,44 @@ class Paiement(models.Model):
     reference = models.CharField(max_length=50, unique=True)
 
     facture = models.ForeignKey(
-        Facture, on_delete=models.CASCADE, related_name='paiements')
+        Facture, on_delete=models.CASCADE, related_name='paiements'
+    )
     client = models.ForeignKey(
-        Client, on_delete=models.PROTECT, null=True, blank=True, related_name='paiements')
+        Client, on_delete=models.PROTECT, null=True, blank=True, 
+        related_name='paiements'
+    )
     vente = models.ForeignKey(
-        Vente, on_delete=models.PROTECT, null=True, blank=True, related_name='paiements')
+        Vente, on_delete=models.PROTECT, null=True, blank=True, 
+        related_name='paiements'
+    )
 
     montant = models.DecimalField(
-        max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
+        max_digits=12, decimal_places=2, 
+        validators=[MinValueValidator(0)]
+    )
     methode = models.CharField(max_length=20, choices=METHODES_PAIEMENT)
     date_paiement = models.DateField(auto_now_add=True)
 
-    reference_externe = models.CharField(max_length=100, blank=True, null=True,
-                                         help_text="Référence du paiement (numéro de chèque, de virement, etc.)")
+    reference_externe = models.CharField(
+        max_length=100, blank=True, null=True,
+        help_text="Référence du paiement (numéro de chèque, de virement, etc.)"
+    )
 
     statut = models.CharField(
-        max_length=20, choices=STATUT_PAIEMENT, default='completed')
+        max_length=20, choices=STATUT_PAIEMENT, default='completed'
+    )
     notes = models.TextField(blank=True, null=True)
 
-    encaisse_par = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                     related_name='paiements_encaisses')
+    encaisse_par = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='paiements_encaisses'
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     # ============================================================
-    # DESTINATION DE L'ENCAISSEMENT (avec chaînes pour éviter l'import circulaire)
+    # DESTINATION DE L'ENCAISSEMENT
     # ============================================================
     caisse_destination = models.ForeignKey(
         'tresorerie.Caisse',
@@ -462,41 +475,93 @@ class Paiement(models.Model):
         return f"PAI-{self.reference} - {self.montant} FCFA"
 
     def save(self, *args, **kwargs):
+        # Génération automatique de la référence
         if not self.reference:
             from datetime import datetime
             prefix = f"PAI{datetime.now().strftime('%Y%m%d')}"
             last = Paiement.objects.filter(
-                reference__startswith=prefix).order_by('-id').first()
+                reference__startswith=prefix
+            ).order_by('-id').first()
             if last:
-                last_num = int(last.reference.replace(prefix, ''))
-                self.reference = f"{prefix}{str(last_num + 1).zfill(4)}"
+                try:
+                    last_num = int(last.reference.replace(prefix, ''))
+                    self.reference = f"{prefix}{str(last_num + 1).zfill(4)}"
+                except (ValueError, AttributeError):
+                    self.reference = f"{prefix}0001"
             else:
                 self.reference = f"{prefix}0001"
 
         # ✅ Création du mouvement de trésorerie si le paiement est complété
         #    et qu'il n'y en a pas encore
         if self.statut == 'completed' and not self.mouvement_tresorerie:
-            # Importer localement pour éviter l'import circulaire
-            from tresorerie.models import Caisse, CompteBancaire, MouvementTresorerie
+            self._creer_mouvement_tresorerie()
 
+        super().save(*args, **kwargs)
+
+        # Mise à jour de la facture et de la vente APRÈS la sauvegarde
+        self.mettre_a_jour_facture()
+        if self.vente:
+            self.mettre_a_jour_vente()
+
+    def _creer_mouvement_tresorerie(self):
+        """Crée le mouvement de trésorerie pour ce paiement"""
+        from tresorerie.models import Caisse, CompteBancaire, MouvementTresorerie
+        import logging
+        logger = logging.getLogger(__name__)
+
+        try:
             # Déterminer la destination
             caisse = self.caisse_destination
             compte = self.compte_destination
 
-            # Fallback : caisse par défaut de l'agence (via la facture ou la vente)
+            # Récupérer l'agence
+            agence = None
+            if self.facture:
+                agence = self.facture.agence
+            elif self.vente:
+                agence = self.vente.agence
+
+            if not agence:
+                raise ValidationError(
+                    "Impossible de déterminer l'agence. "
+                    "Vérifiez que la facture ou la vente est associée à une agence."
+                )
+
+            # ✅ SI AUCUNE CAISSE OU COMPTE SPÉCIFIÉ
             if not caisse and not compte:
-                agence = None
-                if self.facture:
-                    agence = self.facture.agence
-                elif self.vente:
-                    agence = self.vente.agence
-                if agence:
-                    caisse = Caisse.objects.filter(
-                        agence=agence, is_default=True).first()
+                # 1. Chercher une caisse pour cette agence
+                caisse = Caisse.objects.filter(
+                    agence=agence,
+                    is_active=True
+                ).first()
+                
+                # 2. Si aucune caisse n'existe, la créer AUTOMATIQUEMENT
                 if not caisse:
-                    raise ValidationError(
-                        "Impossible de déterminer une caisse ou un compte de destination. "
-                        "Veuillez spécifier une destination ou configurer une caisse par défaut."
+                    caisse = Caisse.objects.create(
+                        code=f"CAISSE_{agence.id}_{timezone.now().strftime('%Y%m%d%H%M%S')}",
+                        nom=f"Caisse de {agence.nom}",
+                        type_caisse='principale',
+                        agence=agence,
+                        is_default=True,
+                        is_active=True,
+                        solde_initial=0,
+                        solde_actuel=0,
+                        devise='GNF',
+                        description=f"Caisse automatique créée pour l'agence {agence.nom}",
+                        created_by=self.encaisse_par
+                    )
+                    logger.info(
+                        f"✅ Caisse automatique créée pour l'agence {agence.nom} "
+                        f"(ID: {caisse.id})"
+                    )
+                
+                # 3. S'assurer que cette caisse est par défaut
+                if not caisse.is_default:
+                    caisse.is_default = True
+                    caisse.save(update_fields=['is_default'])
+                    logger.info(
+                        f"✅ Caisse {caisse.nom} définie comme par défaut "
+                        f"pour l'agence {agence.nom}"
                     )
 
             # Créer le mouvement d'encaissement
@@ -513,22 +578,30 @@ class Paiement(models.Model):
                 date_mouvement=timezone.now(),
                 date_valeur=timezone.now().date(),
                 status='effectue',
-                libelle=f"Paiement {self.reference} - {self.client.nom if self.client else ''}",
+                libelle=f"Paiement {self.reference} - {self.client.nom if self.client else 'Client'}",
                 created_by=self.encaisse_par
             )
+            
             self.mouvement_tresorerie = mouvement
+            logger.info(
+                f"✅ Mouvement de trésorerie créé pour le paiement {self.reference} "
+                f"(ID: {mouvement.id})"
+            )
 
-        super().save(*args, **kwargs)
-
-        # Mise à jour de la facture et de la vente
-        self.mettre_a_jour_facture()
-        if self.vente:
-            self.mettre_a_jour_vente()
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la création du mouvement: {str(e)}")
+            raise ValidationError(
+                f"Erreur lors de la création du mouvement de trésorerie: {str(e)}"
+            )
 
     def mettre_a_jour_facture(self):
         """Recompte le total payé de la facture"""
-        total_paye = self.facture.paiements.filter(statut='completed').aggregate(
-            total=models.Sum('montant')
+        from django.db.models import Sum
+        
+        total_paye = self.facture.paiements.filter(
+            statut='completed'
+        ).aggregate(
+            total=Sum('montant')
         )['total'] or 0
 
         self.facture.montant_paye = total_paye
@@ -542,18 +615,26 @@ class Paiement(models.Model):
             self.facture.status = 'overdue'
 
         self.facture.save(
-            update_fields=['montant_paye', 'montant_restant', 'status'])
+            update_fields=['montant_paye', 'montant_restant', 'status']
+        )
 
     def mettre_a_jour_vente(self):
-        total_paye_vente = self.vente.paiements.filter(statut='completed').aggregate(
-            total=models.Sum('montant')
+        """Recompte le total payé de la vente"""
+        from django.db.models import Sum
+        
+        total_paye_vente = self.vente.paiements.filter(
+            statut='completed'
+        ).aggregate(
+            total=Sum('montant')
         )['total'] or 0
 
         self.vente.montant_paye = total_paye_vente
         self.vente.montant_du = self.vente.total - total_paye_vente
         self.vente.est_paye = total_paye_vente >= self.vente.total
+        
         self.vente.save(
-            update_fields=['montant_paye', 'montant_du', 'est_paye'])
+            update_fields=['montant_paye', 'montant_du', 'est_paye']
+        )
 
     @property
     def methode_display(self):

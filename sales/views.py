@@ -1,3 +1,5 @@
+from produits.models import ProductPricing
+from inventaire.models import WarehouseStock, StockMovement, Warehouse, Lot, get_default_warehouse
 from inventaire.models import get_default_warehouse
 from inventaire.models import WarehouseStock, StockMovement, Warehouse, Lot  # Lot ajouté
 from users.permissions import HasAgenceAccess
@@ -72,6 +74,12 @@ class ClientViewSet(viewsets.ModelViewSet):
                 status='completed',
                 notes="Création automatique pour association client-agence"
             )
+
+# sales/views.py - VENTEVIEWSET COMPLET CORRIGÉ (UNIQUEMENT suppression de variant)
+# sales/views.py - VENTEVIEWSET COMPLET
+
+
+logger = logging.getLogger(__name__)
 
 
 class VenteViewSet(viewsets.ModelViewSet):
@@ -242,6 +250,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         vente = self.get_object()
         user = request.user
 
+        # Vérification des permissions
         if not (user.est_chef_agence() or user.est_pdg()):
             return Response(
                 {'error': 'Seul le chef d\'agence ou le PDG peut approuver une vente'},
@@ -275,79 +284,80 @@ class VenteViewSet(viewsets.ModelViewSet):
         for item in items_to_process:
             quantity_needed = item.quantity
 
-            if item.lot:
-                # =================== PRÉLÈVEMENT MANUEL (lot spécifié) ===================
-                lot = item.lot
-                if lot.quantity < quantity_needed:
-                    stock_insuffisant.append({
-                        'product': item.product.name,
-                        'lot': lot.lot_number,
-                        'disponible': lot.quantity,
-                        'demande': quantity_needed,
-                        'manquant': quantity_needed - lot.quantity
-                    })
-                    continue
-                # Prélèvement
-                lot.quantity -= quantity_needed
-                lot.save()
-                mouvements.append({
-                    'product': item.product,
-                    'variant': item.variant,
-                    'quantity': quantity_needed,
-                    'lot': lot,
-                    'unit_price': item.prix_unitaire
+            # ✅ Vérifier d'abord le stock dans WarehouseStock
+            warehouse_stock = WarehouseStock.objects.filter(
+                product=item.product,
+                warehouse=warehouse,
+                variant=item.variant
+            ).first()
+
+            # ✅ Si pas de stock dans WarehouseStock => erreur
+            if not warehouse_stock or warehouse_stock.quantity < quantity_needed:
+                stock_disponible = warehouse_stock.quantity if warehouse_stock else 0
+                stock_insuffisant.append({
+                    'product': item.product.name,
+                    'variant': item.variant.name if item.variant else 'Sans variante',
+                    'disponible': stock_disponible,
+                    'demande': quantity_needed,
+                    'manquant': quantity_needed - stock_disponible
                 })
-                # Marquer l'item avec le lot prélevé (déjà fait, mais on peut garder)
-                item.warehouse_source = warehouse  # pour info
-                item.stock_preleve = True
-                item.save()
+                continue
 
-            else:
-                # =================== PRÉLÈVEMENT AUTOMATIQUE (FIFO) ===================
-                remaining = quantity_needed
-                # Récupérer les lots du produit/variant dans l'entrepôt, en bon état, avec stock > 0
-                lots = Lot.objects.filter(
-                    product=item.product,
-                    warehouse=warehouse,
-                    variant=item.variant,
-                    quantity__gt=0,
-                    quality_status='good'
-                ).order_by('expiry_date')  # FIFO par date d'expiration
+            # =================== PRÉLÈVEMENT ===================
+            remaining = quantity_needed
 
-                for lot in lots:
+            # ✅ Vérifier s'il y a des lots disponibles pour ce produit
+            lots_disponibles = Lot.objects.filter(
+                product=item.product,
+                warehouse=warehouse,
+                quantity__gt=0,
+                quality_status='good'
+            ).order_by('expiry_date')  # FIFO par date d'expiration
+
+            # ✅ CAS 1: Prélèvement depuis les lots (FIFO) si des lots existent
+            if lots_disponibles.exists():
+                for lot in lots_disponibles:
                     if remaining <= 0:
                         break
+
                     take = min(lot.quantity, remaining)
+
+                    # Prélèvement UNIQUEMENT depuis le lot
                     lot.quantity -= take
                     lot.save()
+
                     remaining -= take
+
                     mouvements.append({
                         'product': item.product,
                         'variant': item.variant,
                         'quantity': take,
                         'lot': lot,
-                        'unit_price': item.prix_unitaire
+                        'unit_price': item.prix_unitaire,
+                        'source_type': 'lot'
                     })
-                    # On ne marque pas l'item avec un lot spécifique car on a prélevé plusieurs lots
-                    # On pourrait créer plusieurs enregistrements VenteLot si nécessaire, mais ici on simplifie
-                    # On enregistre le premier lot pour référence (optionnel)
-                    # Pour la traçabilité, on pourrait stocker une liste de lots dans un champ JSON du VenteItem
-                    # Ou on pourrait créer des lignes enfant. On ignore pour l'instant.
 
-                if remaining > 0:
-                    stock_insuffisant.append({
-                        'product': item.product.name,
-                        'variant': item.variant.name if item.variant else 'Sans variante',
-                        'message': 'Stock insuffisant dans tous les lots',
-                        'demande': quantity_needed,
-                        'manquant': remaining
-                    })
-                else:
-                    # Marquer l'item comme prélevé (même si plusieurs lots)
-                    item.warehouse_source = warehouse
-                    item.stock_preleve = True
-                    item.save()
+            # ✅ CAS 2: Si reste à prélever, prendre depuis WarehouseStock
+            if remaining > 0:
+                # Prélèvement UNIQUEMENT depuis WarehouseStock
+                warehouse_stock.quantity -= remaining
+                warehouse_stock.save()
 
+                mouvements.append({
+                    'product': item.product,
+                    'variant': item.variant,
+                    'quantity': remaining,
+                    'lot': None,
+                    'unit_price': item.prix_unitaire,
+                    'source_type': 'warehouse_stock'
+                })
+
+            # Marquer l'item comme prélevé
+            item.warehouse_source = warehouse
+            item.stock_preleve = True
+            item.save()
+
+        # ✅ Si stock insuffisant, retourner l'erreur
         if stock_insuffisant:
             return Response(
                 {'error': 'Stock insuffisant pour approuver la vente',
@@ -355,21 +365,34 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Créer les mouvements de stock (un par prélèvement de lot)
+        # =================== CRÉATION DES MOUVEMENTS DE STOCK ===================
         for mov in mouvements:
-            StockMovement.objects.create(
-                movement_type='out',
-                reference_type='sale',
-                reference_id=vente.id,
-                product=mov['product'],
-                variant=mov['variant'],
-                quantity=mov['quantity'],
-                from_warehouse=warehouse,
-                unit_price=mov['unit_price'],
-                notes=f"Vente {vente.reference} - Lot {mov['lot'].lot_number}",
-                created_by=user
-                # Si vous avez ajouté un champ lot dans StockMovement, ajoutez : lot=mov['lot']
-            )
+            if mov['source_type'] == 'lot':
+                StockMovement.objects.create(
+                    movement_type='out',
+                    reference_type='sale',
+                    reference_id=vente.id,
+                    product=mov['product'],
+                    variant=mov['variant'],
+                    quantity=mov['quantity'],
+                    from_warehouse=warehouse,
+                    unit_price=mov['unit_price'],
+                    notes=f"Vente {vente.reference} - Lot {mov['lot'].lot_number}",
+                    created_by=user
+                )
+            else:
+                StockMovement.objects.create(
+                    movement_type='out',
+                    reference_type='sale',
+                    reference_id=vente.id,
+                    product=mov['product'],
+                    variant=mov['variant'],
+                    quantity=mov['quantity'],
+                    from_warehouse=warehouse,
+                    unit_price=mov['unit_price'],
+                    notes=f"Vente {vente.reference} - Prélèvement depuis stock (sans lot)",
+                    created_by=user
+                )
 
         # Mettre à jour le stock global des produits (pour cohérence)
         for item in items_to_process:
@@ -386,7 +409,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         vente.date_approbation = timezone.now()
         vente.save()
 
-        # Création automatique de la facture - SANS TVA
+        # =================== CRÉATION AUTOMATIQUE DE LA FACTURE ===================
         facture_creee = False
         facture_reference = None
 
