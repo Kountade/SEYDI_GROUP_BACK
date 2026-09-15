@@ -17,9 +17,60 @@ class ClientSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at', 'updated_at', 'created_by')
 
 
+class ClientDetailSerializer(serializers.ModelSerializer):
+    """Serializer de détail du client avec ses relations"""
+    ventes = serializers.SerializerMethodField()
+    factures = serializers.SerializerMethodField()
+    total_ventes = serializers.IntegerField(read_only=True)
+    total_achats = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True)
+    total_paye = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True)
+    reste_a_payer = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True)
+    created_by_name = serializers.CharField(
+        source='created_by.email', read_only=True, default='')
+
+    class Meta:
+        model = Client
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at', 'updated_at', 'created_by')
+
+    def get_ventes(self, obj):
+        """Récupère uniquement les ventes du client"""
+        ventes = obj.ventes.all().order_by('-date_vente')
+        return VenteListSerializer(ventes, many=True, context=self.context).data
+
+    def get_factures(self, obj):
+        """Récupère uniquement les factures du client"""
+        # Utiliser le filtre direct sur Facture car le related_name n'est pas défini
+        from .models import Facture
+        factures = Facture.objects.filter(client=obj).order_by('-date_facture')
+        return FactureListSerializer(factures, many=True, context=self.context).data
+
+    def to_representation(self, instance):
+        """Ajoute les statistiques calculées"""
+        data = super().to_representation(instance)
+
+        # Calculer les statistiques
+        ventes_qs = instance.ventes.all()
+        total_achats = ventes_qs.aggregate(total=Sum('total'))['total'] or 0
+        total_paye = ventes_qs.aggregate(
+            total=Sum('montant_paye'))['total'] or 0
+
+        data['total_ventes'] = ventes_qs.count()
+        data['total_factures'] = Facture.objects.filter(
+            client=instance).count()
+        data['total_achats'] = total_achats
+        data['total_paye'] = total_paye
+        data['reste_a_payer'] = total_achats - total_paye
+
+        return data
 # ============================================================
 # VENTE ITEM SERIALIZER – avec lot
 # ============================================================
+
+
 class VenteItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(

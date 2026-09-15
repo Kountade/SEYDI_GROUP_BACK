@@ -46,6 +46,12 @@ class ClientViewSet(viewsets.ModelViewSet):
     search_fields = ['nom', 'prenom', 'email', 'telephone', 'raison_sociale']
     ordering_fields = ['nom', 'created_at']
 
+    def get_serializer_class(self):
+        """Utilise ClientDetailSerializer pour les détails, ClientSerializer pour le reste"""
+        if self.action == 'retrieve':
+            return ClientDetailSerializer
+        return ClientSerializer
+
     def get_queryset(self):
         user = self.request.user
         if not user or not user.is_authenticated:
@@ -74,7 +80,6 @@ class ClientViewSet(viewsets.ModelViewSet):
                 status='completed',
                 notes="Création automatique pour association client-agence"
             )
-
 # sales/views.py - VENTEVIEWSET COMPLET CORRIGÉ (UNIQUEMENT suppression de variant)
 # sales/views.py - VENTEVIEWSET COMPLET
 
