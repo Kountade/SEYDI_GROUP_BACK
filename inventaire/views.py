@@ -628,18 +628,75 @@ class LocationViewSet(viewsets.ModelViewSet):
 # STOCK MOVEMENT VIEWSET
 # ============================================================
 
+# ============================================================
+# STOCK MOVEMENT VIEWSET ✅ CORRIGÉ
+# ============================================================
+
 class StockMovementViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasAgenceAccess]
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            return StockMovement.objects.all()
-        agences_ids = user.get_agences().values_list('id', flat=True)
-        return StockMovement.objects.filter(
-            Q(from_warehouse__agence_id__in=agences_ids) |
-            Q(to_warehouse__agence_id__in=agences_ids)
-        )
+        qs = StockMovement.objects.select_related(
+            'product', 'variant', 'from_warehouse', 'to_warehouse', 'created_by'
+        ).all()
+
+        # PDG / DRH / superuser : tout voir
+        if user.is_superuser or user.is_staff:
+            pass
+        elif user.est_pdg() or user.est_drh():
+            pass
+        else:
+            agences_ids = list(user.get_agences().values_list('id', flat=True))
+            if agences_ids:
+                qs = qs.filter(
+                    Q(from_warehouse__agence_id__in=agences_ids) |
+                    Q(to_warehouse__agence_id__in=agences_ids)
+                )
+            else:
+                # Pas d'agence → aucun mouvement
+                qs = qs.none()
+
+        # ===== FILTRES =====
+        movement_type = self.request.query_params.get('movement_type')
+        if movement_type:
+            qs = qs.filter(movement_type=movement_type)
+
+        product = self.request.query_params.get('product')
+        if product:
+            try:
+                qs = qs.filter(product_id=int(product))
+            except (ValueError, TypeError):
+                pass
+
+        warehouse = self.request.query_params.get('warehouse')
+        if warehouse:
+            try:
+                wid = int(warehouse)
+                qs = qs.filter(
+                    Q(from_warehouse_id=wid) | Q(to_warehouse_id=wid)
+                )
+            except (ValueError, TypeError):
+                pass
+
+        date_debut = self.request.query_params.get('date_debut')
+        if date_debut:
+            qs = qs.filter(movement_date__date__gte=date_debut)
+
+        date_fin = self.request.query_params.get('date_fin')
+        if date_fin:
+            qs = qs.filter(movement_date__date__lte=date_fin)
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(reference__icontains=search) |
+                Q(product__name__icontains=search) |
+                Q(product__reference__icontains=search) |
+                Q(notes__icontains=search)
+            )
+
+        return qs.order_by('-movement_date')
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -650,6 +707,40 @@ class StockMovementViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        """Export CSV des mouvements"""
+        import csv
+        from django.http import HttpResponse
+
+        qs = self.get_queryset()
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = (
+            f'attachment; filename="mouvements_stock_{timezone.now().date()}.csv"'
+        )
+        writer = csv.writer(response)
+        writer.writerow([
+            'Référence', 'Type', 'Produit', 'Référence produit', 'Quantité',
+            'Entrepôt source', 'Entrepôt destination', 'Prix unitaire',
+            'Total', 'Date', 'Créé par', 'Notes'
+        ])
+        for m in qs:
+            writer.writerow([
+                m.reference,
+                m.get_movement_type_display(),
+                m.product.name if m.product else '',
+                m.product.reference if m.product else '',
+                m.quantity,
+                m.from_warehouse.name if m.from_warehouse else '',
+                m.to_warehouse.name if m.to_warehouse else '',
+                m.unit_price,
+                m.total_price,
+                m.movement_date.strftime('%Y-%m-%d %H:%M:%S'),
+                m.created_by.email if m.created_by else '',
+                m.notes or '',
+            ])
+        return response
 
 
 class StockMovementByProductView(generics.ListAPIView):
@@ -869,15 +960,18 @@ class QualityControlViewSet(viewsets.ModelViewSet):
 # WAREHOUSE STOCK VIEWSET ✅ CORRIGÉ
 # ============================================================
 
+# ============================================================
+# WAREHOUSE STOCK VIEWSET ✅ CORRIGÉ (TRACABILITÉ AJOUT MANUEL)
+# ============================================================
+
 class WarehouseStockViewSet(viewsets.ModelViewSet):
     serializer_class = WarehouseStockSerializer
     permission_classes = [IsAuthenticated, HasAgenceAccess]
 
     def get_permissions(self):
-        # ✅ Utilisation de la permission combinée instanciée
         if self.action in [
             'create', 'update', 'partial_update', 'destroy',
-            'adjust_stock', 'add_stock',
+            'adjust_stock', 'add_stock', 'initialize_stock',
         ]:
             return [IsAuthenticated(), IsPDGOrChefAgence()]
         return [IsAuthenticated(), HasAgenceAccess()]
@@ -928,23 +1022,21 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     # --------------------------------------------------------
-    # ✅ POST add_stock (AJOUT ADDITIF — jamais refusé)
+    # ✅ POST add_stock — TRACABILITÉ GARANTIE
     # --------------------------------------------------------
     @action(detail=False, methods=['post'])
     @transaction.atomic
     def add_stock(self, request):
         """
         Ajoute du stock à un produit dans un entrepôt.
-        - Si le stock n'existe pas → le crée avec la quantité
-        - Si le stock existe → AJOUTE la quantité à l'existant
-        - Crée un mouvement 'in' pour la traçabilité
+        ✅ Crée TOUJOURS un StockMovement pour la traçabilité.
         """
         product_id = request.data.get('product_id')
         warehouse_id = request.data.get('warehouse_id')
         quantity = request.data.get('quantity')
         variant_id = request.data.get('variant_id')
         notes = request.data.get('notes', 'Ajout manuel de stock')
-        unit_price = request.data.get('unit_price', 0)
+        unit_price = request.data.get('unit_price', 0) or 0
 
         # --- Validation
         if not product_id or not warehouse_id:
@@ -966,23 +1058,26 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # --- Récupération
+        # --- Récupération produit
         try:
             product = Product.objects.get(id=product_id)
         except Product.DoesNotExist:
             return Response({'error': 'Produit non trouvé'}, status=404)
 
+        # --- Récupération entrepôt
         try:
             warehouse = Warehouse.objects.get(id=warehouse_id)
         except Warehouse.DoesNotExist:
             return Response({'error': 'Entrepôt non trouvé'}, status=404)
 
+        # --- Vérification accès
         if not request.user.est_pdg() and not request.user.peut_acceder_agence(warehouse.agence.id):
             return Response(
                 {'error': 'Accès non autorisé à cet entrepôt'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # --- Variante
         variant = None
         if variant_id:
             try:
@@ -994,26 +1089,16 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                     status=404,
                 )
 
-        # --- Récupérer ou créer le stock
-        warehouse_stock, created = WarehouseStock.objects.get_or_create(
-            product=product,
-            warehouse=warehouse,
-            variant=variant,
-            defaults={
-                'quantity': 0,
-                'minimum_stock': product.minimum_stock,
-                'maximum_stock': product.maximum_stock,
-                'updated_by': request.user,
-            },
-        )
+        # --- Récupérer l'état AVANT pour le message de retour
+        existing_stock = WarehouseStock.objects.filter(
+            product=product, warehouse=warehouse, variant=variant
+        ).first()
+        old_quantity = existing_stock.quantity if existing_stock else 0
 
-        old_quantity = warehouse_stock.quantity
-        warehouse_stock.quantity = old_quantity + quantity
-        warehouse_stock.updated_by = request.user
-        warehouse_stock.save()
-
-        # --- Mouvement de traçabilité
-        movement_ref = None
+        # ============================================================
+        # ✅ ÉTAPE 1 : CRÉER LE MOUVEMENT (traçabilité)
+        # ⚠️ unit_price = 0 si non fourni — on ne touche pas au prix produit
+        # ============================================================
         try:
             movement = StockMovement.objects.create(
                 movement_type='in',
@@ -1022,27 +1107,45 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                 variant=variant,
                 quantity=quantity,
                 to_warehouse=warehouse,
-                unit_price=unit_price or product.purchase_price or 0,
+                unit_price=unit_price,
                 notes=notes,
                 created_by=request.user,
             )
             movement_ref = movement.reference
+            print(f"✅ Mouvement créé: {movement_ref} - {quantity} unités de "
+                  f"{product.name} vers {warehouse.name}")
         except Exception as e:
-            print(f"⚠️ Erreur création mouvement : {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"❌ Erreur création mouvement : {e}")
+            return Response(
+                {'error': f'Erreur lors de la création du mouvement: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        # --- Mise à jour du stock global produit
+        # ============================================================
+        # ✅ ÉTAPE 2 : Récupérer le stock APRÈS (mis à jour par le signal)
+        # ============================================================
+        warehouse_stock = WarehouseStock.objects.get(
+            product=product, warehouse=warehouse, variant=variant
+        )
+
+        # ============================================================
+        # ✅ ÉTAPE 3 : Mise à jour du stock global produit
+        # ============================================================
         total_stock = WarehouseStock.objects.filter(product=product).aggregate(
             total=Sum('quantity')
         )['total'] or 0
-        product.stock_quantity = total_stock
-        product.save(update_fields=['stock_quantity', 'updated_at'])
+        if product.stock_quantity != total_stock:
+            product.stock_quantity = total_stock
+            product.save(update_fields=['stock_quantity', 'updated_at'])
 
         serializer = self.get_serializer(warehouse_stock)
         return Response(
             {
                 'success': True,
                 'message': f'Stock ajouté : {old_quantity} → {warehouse_stock.quantity} unités',
-                'was_created': created,
+                'was_created': existing_stock is None,
                 'old_quantity': old_quantity,
                 'added_quantity': quantity,
                 'new_quantity': warehouse_stock.quantity,
@@ -1050,13 +1153,14 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                 'movement_reference': movement_ref,
                 'stock': serializer.data,
             },
-            status=status.HTTP_200_OK if not created else status.HTTP_201_CREATED,
+            status=status.HTTP_200_OK if existing_stock else status.HTTP_201_CREATED,
         )
 
     # --------------------------------------------------------
-    # POST adjust_stock (REMPLACE la quantité — admin)
+    # POST adjust_stock — avec traçabilité
     # --------------------------------------------------------
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def adjust_stock(self, request, pk=None):
         warehouse_stock = self.get_object()
         new_quantity = request.data.get('quantity')
@@ -1072,50 +1176,68 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                     {'error': 'La quantité ne peut pas être négative'},
                     status=400,
                 )
-
-            old_quantity = warehouse_stock.quantity
-            difference = new_quantity - old_quantity
-
-            if difference != 0:
-                StockMovement.objects.create(
-                    movement_type='adjustment',
-                    reference_type='manual',
-                    product=warehouse_stock.product,
-                    variant=warehouse_stock.variant,
-                    quantity=abs(difference),
-                    to_warehouse=warehouse_stock.warehouse if difference > 0 else None,
-                    from_warehouse=warehouse_stock.warehouse if difference < 0 else None,
-                    unit_price=0,
-                    notes=f"Ajustement manuel: {reason}",
-                    created_by=request.user,
-                )
-
-                warehouse_stock.quantity = new_quantity
-                warehouse_stock.updated_by = request.user
-                warehouse_stock.save()
-
-                product = warehouse_stock.product
-                total_stock = WarehouseStock.objects.filter(product=product).aggregate(
-                    total=Sum('quantity')
-                )['total'] or 0
-                product.stock_quantity = total_stock
-                product.save()
-
-            serializer = self.get_serializer(warehouse_stock)
-            return Response({
-                'message': f'Stock ajusté de {old_quantity} à {new_quantity}',
-                'stock': serializer.data,
-            })
-        except ValueError:
+        except (ValueError, TypeError):
             return Response(
                 {'error': 'La quantité doit être un nombre entier'},
                 status=400,
             )
 
+        old_quantity = warehouse_stock.quantity
+        difference = new_quantity - old_quantity
+
+        if difference == 0:
+            serializer = self.get_serializer(warehouse_stock)
+            return Response({
+                'message': 'Aucun changement de quantité',
+                'stock': serializer.data,
+            })
+
+        # --- Créer le mouvement AVANT (traçabilité)
+        try:
+            movement = StockMovement.objects.create(
+                movement_type='adjustment',
+                reference_type='manual',
+                product=warehouse_stock.product,
+                variant=warehouse_stock.variant,
+                quantity=abs(difference),
+                to_warehouse=warehouse_stock.warehouse if difference > 0 else None,
+                from_warehouse=warehouse_stock.warehouse if difference < 0 else None,
+                unit_price=0,
+                notes=f"Ajustement manuel: {reason} ({old_quantity} → {new_quantity})",
+                created_by=request.user,
+            )
+            print(f"✅ Mouvement ajustement créé: {movement.reference}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': f'Erreur création mouvement: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        warehouse_stock.refresh_from_db()
+
+        product = warehouse_stock.product
+        total_stock = WarehouseStock.objects.filter(product=product).aggregate(
+            total=Sum('quantity')
+        )['total'] or 0
+        if product.stock_quantity != total_stock:
+            product.stock_quantity = total_stock
+            product.save(update_fields=['stock_quantity', 'updated_at'])
+
+        serializer = self.get_serializer(warehouse_stock)
+        return Response({
+            'success': True,
+            'message': f'Stock ajusté de {old_quantity} à {new_quantity}',
+            'movement_reference': movement.reference,
+            'stock': serializer.data,
+        })
+
     # --------------------------------------------------------
-    # POST initialize_stock (compatibilité ancienne API)
+    # POST initialize_stock — avec traçabilité
     # --------------------------------------------------------
     @action(detail=False, methods=['post'])
+    @transaction.atomic
     def initialize_stock(self, request):
         product_id = request.data.get('product_id')
         warehouse_id = request.data.get('warehouse_id')
@@ -1128,44 +1250,81 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
             )
 
         try:
+            quantity = int(quantity)
+            if quantity < 0:
+                return Response(
+                    {'error': 'La quantité ne peut pas être négative'},
+                    status=400,
+                )
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Quantité invalide'},
+                status=400,
+            )
+
+        try:
             product = Product.objects.get(id=product_id)
             warehouse = Warehouse.objects.get(id=warehouse_id)
-
-            if not request.user.est_pdg() and not request.user.peut_acceder_agence(warehouse.agence.id):
-                return Response({'error': 'Accès non autorisé'}, status=403)
-
-            warehouse_stock, created = WarehouseStock.objects.get_or_create(
-                product=product,
-                warehouse=warehouse,
-                defaults={
-                    'quantity': quantity,
-                    'minimum_stock': product.minimum_stock,
-                    'maximum_stock': product.maximum_stock,
-                    'updated_by': request.user,
-                },
-            )
-            if not created:
-                warehouse_stock.quantity = quantity
-                warehouse_stock.updated_by = request.user
-                warehouse_stock.save()
-
-            total_stock = WarehouseStock.objects.filter(product=product).aggregate(
-                total=Sum('quantity')
-            )['total'] or 0
-            product.stock_quantity = total_stock
-            product.save()
-
-            serializer = self.get_serializer(warehouse_stock)
-            return Response(serializer.data, status=201)
         except Product.DoesNotExist:
             return Response({'error': 'Produit non trouvé'}, status=404)
         except Warehouse.DoesNotExist:
             return Response({'error': 'Entrepôt non trouvé'}, status=404)
 
+        if not request.user.est_pdg() and not request.user.peut_acceder_agence(warehouse.agence.id):
+            return Response({'error': 'Accès non autorisé'}, status=403)
+
+        existing_stock = WarehouseStock.objects.filter(
+            product=product, warehouse=warehouse, variant=None
+        ).first()
+
+        if existing_stock:
+            difference = quantity - existing_stock.quantity
+            if difference != 0:
+                StockMovement.objects.create(
+                    movement_type='adjustment',
+                    reference_type='manual',
+                    product=product,
+                    quantity=abs(difference),
+                    to_warehouse=warehouse if difference > 0 else None,
+                    from_warehouse=warehouse if difference < 0 else None,
+                    unit_price=0,
+                    notes=f"Initialisation: {existing_stock.quantity} → {quantity}",
+                    created_by=request.user,
+                )
+                existing_stock.refresh_from_db()
+
+            serializer = self.get_serializer(existing_stock)
+            return Response(serializer.data, status=200)
+
+        if quantity > 0:
+            StockMovement.objects.create(
+                movement_type='in',
+                reference_type='manual',
+                product=product,
+                quantity=quantity,
+                to_warehouse=warehouse,
+                unit_price=0,
+                notes="Initialisation de stock",
+                created_by=request.user,
+            )
+
+        warehouse_stock = WarehouseStock.objects.get(
+            product=product, warehouse=warehouse, variant=None
+        )
+
+        total_stock = WarehouseStock.objects.filter(product=product).aggregate(
+            total=Sum('quantity')
+        )['total'] or 0
+        product.stock_quantity = total_stock
+        product.save(update_fields=['stock_quantity', 'updated_at'])
+
+        serializer = self.get_serializer(warehouse_stock)
+        return Response(serializer.data, status=201)
 
 # ============================================================
 # LOCATION BY WAREHOUSE
 # ============================================================
+
 
 class LocationByWarehouseView(generics.ListAPIView):
     serializer_class = LocationSerializer

@@ -77,8 +77,9 @@ class StockMovementListSerializer(serializers.ModelSerializer):
     to_warehouse_name = serializers.CharField(
         source='to_warehouse.name', read_only=True)
     movement_type_display = serializers.CharField(
-        source='get_movement_type_display', read_only=True
-    )
+        source='get_movement_type_display', read_only=True)
+    reference_type_display = serializers.CharField(
+        source='get_reference_type_display', read_only=True)
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True)
 
