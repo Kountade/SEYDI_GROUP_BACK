@@ -1,10 +1,15 @@
 # inventaire/serializers.py
 
 from rest_framework import serializers
+from django.utils import timezone
 from .models import *
 from produits.serializers import ProductListSerializer, ProductVariantSerializer
 from users.serializers import UserSerializer, AgenceSimpleSerializer
 
+
+# ============================================================
+# WAREHOUSE
+# ============================================================
 
 class WarehouseSerializer(serializers.ModelSerializer):
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
@@ -13,7 +18,8 @@ class WarehouseSerializer(serializers.ModelSerializer):
     locations_count = serializers.IntegerField(
         source='locations.count', read_only=True)
     warehouse_type_display = serializers.CharField(
-        source='get_warehouse_type_display', read_only=True)
+        source='get_warehouse_type_display', read_only=True
+    )
 
     class Meta:
         model = Warehouse
@@ -31,7 +37,9 @@ class WarehouseDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_locations(self, obj):
-        return LocationSerializer(obj.locations.filter(is_active=True), many=True).data
+        return LocationSerializer(
+            obj.locations.filter(is_active=True), many=True
+        ).data
 
 
 class WarehouseCreateSerializer(serializers.ModelSerializer):
@@ -40,6 +48,10 @@ class WarehouseCreateSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
+
+# ============================================================
+# LOCATION
+# ============================================================
 
 class LocationSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(
@@ -52,6 +64,10 @@ class LocationSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+# ============================================================
+# STOCK MOVEMENT
+# ============================================================
+
 class StockMovementListSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
@@ -61,7 +77,8 @@ class StockMovementListSerializer(serializers.ModelSerializer):
     to_warehouse_name = serializers.CharField(
         source='to_warehouse.name', read_only=True)
     movement_type_display = serializers.CharField(
-        source='get_movement_type_display', read_only=True)
+        source='get_movement_type_display', read_only=True
+    )
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True)
 
@@ -92,21 +109,29 @@ class StockMovementCreateSerializer(serializers.ModelSerializer):
                             'movement_date', 'created_by')
 
     def validate(self, data):
+        # Vérifier les sorties et transferts
         if data.get('movement_type') in ['out', 'transfer']:
             product = data.get('product')
             quantity = data.get('quantity', 0)
             if product and product.stock_quantity < quantity:
                 raise serializers.ValidationError(
-                    f"Stock insuffisant. Disponible: {product.stock_quantity}")
+                    f"Stock insuffisant. Disponible: {product.stock_quantity}"
+                )
 
+        # Vérifier que les entrepôts source/destination sont différents
         if data.get('movement_type') == 'transfer':
             from_wh = data.get('from_warehouse')
             to_wh = data.get('to_warehouse')
             if from_wh and to_wh and from_wh == to_wh:
                 raise serializers.ValidationError(
-                    "Les entrepôts source et destination doivent être différents")
+                    "Les entrepôts source et destination doivent être différents"
+                )
         return data
 
+
+# ============================================================
+# TRANSFER
+# ============================================================
 
 class TransferItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -133,8 +158,11 @@ class TransferCreateSerializer(serializers.ModelSerializer):
         model = Transfer
         fields = ('from_agence', 'to_agence',
                   'expected_date', 'notes', 'items')
-        read_only_fields = ('reference', 'created_at', 'updated_at', 'created_by', 'validated_by',
-                            'completed_date', 'approved_by', 'approved_at', 'rejected_reason')
+        read_only_fields = (
+            'reference', 'created_at', 'updated_at', 'created_by',
+            'validated_by', 'completed_date', 'approved_by',
+            'approved_at', 'rejected_reason',
+        )
 
     def validate(self, data):
         from_agence = data.get('from_agence')
@@ -145,34 +173,42 @@ class TransferCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Les deux agences sont requises")
         if from_agence == to_agence:
             raise serializers.ValidationError(
-                "Les agences source et destination doivent être différentes")
+                "Les agences source et destination doivent être différentes"
+            )
         if from_agence.type_agence != 'principale':
             raise serializers.ValidationError(
-                {"from_agence": "L'agence source doit être une agence principale"})
+                {"from_agence": "L'agence source doit être une agence principale"}
+            )
         if to_agence.type_agence != 'secondaire':
             raise serializers.ValidationError(
-                {"to_agence": "L'agence destination doit être une agence secondaire"})
+                {"to_agence": "L'agence destination doit être une agence secondaire"}
+            )
 
         user = self.context['request'].user
         if not user.peut_acceder_agence(to_agence.id):
             raise serializers.ValidationError(
-                "Vous devez être rattaché à l'agence secondaire destinataire")
+                "Vous devez être rattaché à l'agence secondaire destinataire"
+            )
         if not items_data:
             raise serializers.ValidationError(
-                {"items": "Au moins un article est requis"})
+                {"items": "Au moins un article est requis"}
+            )
 
         for i, item in enumerate(items_data):
             if not item.get('product'):
                 raise serializers.ValidationError(
-                    {"items": f"Article {i+1}: le produit est requis"})
+                    {"items": f"Article {i + 1}: le produit est requis"}
+                )
             quantity = item.get('quantity', 0)
             if quantity <= 0:
                 raise serializers.ValidationError(
-                    {"items": f"Article {i+1}: la quantité doit être positive"})
+                    {"items": f"Article {i + 1}: la quantité doit être positive"}
+                )
             unit_price = item.get('unit_price', 0)
             if unit_price <= 0:
                 raise serializers.ValidationError(
-                    {"items": f"Article {i+1}: le prix unitaire doit être positif"})
+                    {"items": f"Article {i + 1}: le prix unitaire doit être positif"}
+                )
 
         return data
 
@@ -190,7 +226,7 @@ class TransferCreateSerializer(serializers.ModelSerializer):
                 product_id=product_id,
                 quantity=int(item_data['quantity']),
                 unit_price=float(item_data['unit_price']),
-                notes=item_data.get('notes', '')
+                notes=item_data.get('notes', ''),
             )
         return transfer
 
@@ -205,7 +241,7 @@ class TransferListSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True)
     items_count = serializers.IntegerField(
-        source='items.count', read_only=True)  # Ajout de cette ligne
+        source='items.count', read_only=True)
 
     class Meta:
         model = Transfer
@@ -224,6 +260,10 @@ class TransferDetailSerializer(serializers.ModelSerializer):
         model = Transfer
         fields = '__all__'
 
+
+# ============================================================
+# INVENTORY COUNT
+# ============================================================
 
 class InventoryCountListSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(
@@ -266,8 +306,11 @@ class InventoryCountCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = InventoryCount
         fields = '__all__'
-        read_only_fields = ('reference', 'count_date', 'total_items', 'total_differences',
-                            'total_difference_value', 'created_at', 'updated_at', 'counted_by', 'validated_by')
+        read_only_fields = (
+            'reference', 'count_date', 'total_items', 'total_differences',
+            'total_difference_value', 'created_at', 'updated_at',
+            'counted_by', 'validated_by',
+        )
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
@@ -280,7 +323,8 @@ class InventoryCountCreateSerializer(serializers.ModelSerializer):
         inventory.total_differences = inventory.items.filter(
             difference__gt=0).count()
         inventory.total_difference_value = sum(
-            item.difference_value for item in inventory.items.all())
+            item.difference_value for item in inventory.items.all()
+        )
         inventory.save()
         return inventory
 
@@ -290,6 +334,10 @@ class InventoryCountValidateSerializer(serializers.Serializer):
     create_movements = serializers.BooleanField(default=True)
 
 
+# ============================================================
+# STOCK ALERT
+# ============================================================
+
 class StockAlertSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
@@ -297,7 +345,8 @@ class StockAlertSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(
         source='warehouse.name', read_only=True)
     alert_type_display = serializers.CharField(
-        source='get_alert_type_display', read_only=True)
+        source='get_alert_type_display', read_only=True
+    )
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
 
@@ -306,6 +355,10 @@ class StockAlertSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+# ============================================================
+# LOT
+# ============================================================
+
 class LotListSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     warehouse_name = serializers.CharField(
@@ -313,7 +366,8 @@ class LotListSerializer(serializers.ModelSerializer):
     location_code = serializers.CharField(
         source='location.code', read_only=True)
     quality_status_display = serializers.CharField(
-        source='get_quality_status_display', read_only=True)
+        source='get_quality_status_display', read_only=True
+    )
 
     class Meta:
         model = Lot
@@ -334,6 +388,63 @@ class LotDetailSerializer(serializers.ModelSerializer):
         return QualityControlSerializer(obj.quality_controls.all(), many=True).data
 
 
+class LotCreateSerializer(serializers.ModelSerializer):
+    """✅ Serializer dédié à la création manuelle d'un lot"""
+
+    class Meta:
+        model = Lot
+        fields = (
+            'id', 'product', 'warehouse', 'location',
+            'lot_number', 'serial_number',
+            'manufacturing_date', 'expiry_date', 'best_before_date',
+            'quantity', 'quality_status',
+            'supplier', 'purchase_order', 'notes',
+        )
+        read_only_fields = ('id',)
+
+    def validate_quantity(self, value):
+        if value is None or value <= 0:
+            raise serializers.ValidationError(
+                "La quantité doit être supérieure à 0"
+            )
+        return value
+
+    def validate(self, data):
+        warehouse = data.get('warehouse')
+        if warehouse and not warehouse.is_active:
+            raise serializers.ValidationError(
+                {"warehouse": "L'entrepôt sélectionné est inactif"}
+            )
+
+        expiry = data.get('expiry_date')
+        if expiry and expiry < timezone.now().date():
+            raise serializers.ValidationError(
+                {"expiry_date": "La date d'expiration doit être future"}
+            )
+
+        mfg = data.get('manufacturing_date')
+        if mfg and expiry and mfg >= expiry:
+            raise serializers.ValidationError(
+                {"expiry_date": "La date d'expiration doit être après la date de fabrication"}
+            )
+
+        lot_number = data.get('lot_number')
+        if lot_number:
+            qs = Lot.objects.filter(lot_number=lot_number)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    {"lot_number": f"Le numéro de lot '{lot_number}' existe déjà"}
+                )
+
+        return data
+
+
+# ============================================================
+# QUALITY CONTROL
+# ============================================================
+
 class QualityControlSerializer(serializers.ModelSerializer):
     inspector_name = serializers.CharField(
         source='inspector.email', read_only=True)
@@ -344,6 +455,10 @@ class QualityControlSerializer(serializers.ModelSerializer):
         model = QualityControl
         fields = '__all__'
 
+
+# ============================================================
+# WAREHOUSE STOCK
+# ============================================================
 
 class WarehouseStockSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
@@ -365,6 +480,10 @@ class WarehouseStockSerializer(serializers.ModelSerializer):
                 "La quantité ne peut pas être négative")
         return value
 
+
+# ============================================================
+# DASHBOARD
+# ============================================================
 
 class InventoryDashboardSerializer(serializers.Serializer):
     total_warehouses = serializers.IntegerField()
