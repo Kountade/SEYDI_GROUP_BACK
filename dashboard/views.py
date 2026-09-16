@@ -1,474 +1,575 @@
-from .permissions import IsChefAgenceOrAbove  # ← permission élargie
-from django.db.models import Sum, Avg, F
-import logging
+# dashboard/views.py
+"""
+Vues du tableau de bord général.
+Consolide les statistiques de TOUS les modules de l'application.
+Utilise des ViewSets pour être compatible avec le router Django REST.
+"""
+
 from rest_framework import viewsets, status
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Sum, Count, Q, F
-from django.utils import timezone
-from datetime import timedelta
-from decimal import Decimal
-from django.db import connection
+from rest_framework.permissions import IsAuthenticated
 
-from users.models import Agence, CustomUser
-from produits.models import Product
-from purchases.models import Supplier, PurchaseOrder
-from inventaire.models import WarehouseStock, StockAlert, Transfer
-from sales.models import Vente, VenteItem
-from hr.models import Employee, Leave, Attendance
-
-from .permissions import IsPDGOrDRH, IsChefAgenceOrAbove
-from .serializers import (
-    DashboardOverviewSerializer,
-    VentesParMoisSerializer,
-    TopProduitsSerializer,
-    AlertesStockSerializer
-)
-
-# Essayer d'importer ProductPricing si disponible
-try:
-    from produits.models import ProductPricing
-    HAS_PRICING = True
-except ImportError:
-    HAS_PRICING = False
+from users.permissions import HasAgenceAccess
+from . import utils
+from . import charts  # ✅ NOUVEAU : module de graphiques
 
 
 class DashboardViewSet(viewsets.ViewSet):
     """
-    Vue d'ensemble du tableau de bord (KPI généraux, alertes).
+    ViewSet principal du tableau de bord.
+
+    Endpoints disponibles :
+    - GET /dashboard/global/     → Toutes les statistiques + graphiques consolidés
+    - GET /dashboard/stats/      → Statistiques rapides
+    - GET /dashboard/charts/     → Données pour graphiques
+    - GET /dashboard/alertes/    → Alertes de tous les modules
+    - GET /dashboard/modules/    → Statut de chaque module
+    - GET /dashboard/export/     → Export complet JSON
     """
-    permission_classes = [IsAuthenticated, IsChefAgenceOrAbove]
+    permission_classes = [IsAuthenticated, HasAgenceAccess]
 
-    def get_agences(self, user):
-        if user.est_pdg() or user.est_drh():
-            return Agence.objects.filter(est_active=True)
-        return user.get_agences()
-
-    @action(detail=False, methods=['get'])
-    def overview(self, request):
-        """Vue d'ensemble des KPI."""
+    def _get_agences_ids(self, request):
+        """Retourne les IDs des agences accessibles à l'utilisateur."""
         user = request.user
-        agences = self.get_agences(user)
+        agence_id = request.query_params.get('agence_id')
 
-        # Stats générales
-        total_agences = agences.count()
-        total_utilisateurs = CustomUser.objects.filter(
-            roles_agence__agence__in=agences,
-            roles_agence__est_actif=True
-        ).distinct().count()
-        total_produits = Product.objects.filter(is_active=True).count()
-        total_fournisseurs = Supplier.objects.filter(is_active=True).count()
-        total_employes = Employee.objects.count()
+        if agence_id:
+            if not user.peut_acceder_agence(int(agence_id)):
+                return None
+            return [int(agence_id)]
 
-        # Ventes
-        ventes = Vente.objects.filter(agence__in=agences)
-        total_ca = ventes.filter(status='completed').aggregate(
-            total=Sum('total'))['total'] or Decimal('0.00')
-        aujourd_hui = timezone.now().date()
-        ca_jour = ventes.filter(date_vente__date=aujourd_hui, status='completed').aggregate(
-            total=Sum('total'))['total'] or Decimal('0.00')
-        debut_mois = aujourd_hui.replace(day=1)
-        ca_mois = ventes.filter(date_vente__date__gte=debut_mois, status='completed').aggregate(
-            total=Sum('total'))['total'] or Decimal('0.00')
-        ventes_en_attente = ventes.filter(status='pending_approval').count()
-        impayes = ventes.filter(est_paye=False, status__in=['approved', 'completed']).aggregate(
-            total=Sum('montant_du'))['total'] or Decimal('0.00')
+        agences_ids = utils.get_agences_ids(user)
+        if not agences_ids and not (user.est_pdg() or user.est_drh()):
+            return []
+        return agences_ids
 
-        # Achats
-        achats = PurchaseOrder.objects.filter(agence__in=agences)
-        total_achats = achats.filter(status='received').aggregate(
-            total=Sum('total'))['total'] or Decimal('0.00')
-        commandes_encours = achats.filter(status__in=[
-            'draft', 'sent', 'confirmed', 'in_transit', 'partially_received']).count()
-        commandes_retard = achats.filter(expected_date__lt=aujourd_hui, status__in=[
-            'confirmed', 'sent', 'in_transit']).count()
+    # ============================================================
+    # GET /dashboard/global/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='global')
+    def global_view(self, request):
+        """
+        Vue complète du tableau de bord.
+        Retourne TOUTES les statistiques ET TOUS les graphiques
+        de TOUS les modules.
 
-        # Inventaire - calcul de la valeur du stock
-        warehouse_stocks = WarehouseStock.objects.filter(
-            warehouse__agence__in=agences
-        )
-        valeur_stock = Decimal('0.00')
+        Query params:
+        - periode: 'jour', 'semaine', 'mois', 'trimestre', 'annee'
+        - agence_id: ID d'une agence spécifique (optionnel)
+        """
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé à cette agence'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        if HAS_PRICING:
-            # Utiliser ProductPricing pour obtenir les prix d'achat
-            for ws in warehouse_stocks:
-                try:
-                    pricing = ProductPricing.objects.filter(
-                        product=ws.product,
-                        warehouse=ws.warehouse,
-                        is_current=True
-                    ).first()
-                    if pricing:
-                        valeur_stock += (ws.quantity or 0) * \
-                            (pricing.purchase_price or 0)
-                except:
-                    pass
-        else:
-            # Sinon, on peut utiliser un prix par défaut (par exemple 0)
-            # Ou on peut essayer d'utiliser un champ 'price' si présent dans Product
-            # On vérifie si Product a un champ 'price' (par défaut non)
-            if hasattr(Product, 'price'):
-                for ws in warehouse_stocks:
-                    valeur_stock += (ws.quantity or 0) * \
-                        (ws.product.price or 0)
-            else:
-                # En dernier recours, on prend le premier prix de vente disponible
-                # Mais pour l'instant on met 0
-                valeur_stock = Decimal('0.00')
-
-        alertes_stock = StockAlert.objects.filter(
-            warehouse__agence__in=agences, status='active'
-        ).count()
-
-        transferts_encours = Transfer.objects.filter(
-            Q(from_agence__in=agences) | Q(to_agence__in=agences),
-            status__in=['pending_approval', 'approved', 'in_transit']
-        ).distinct().count()
-
-        # RH
-        employes_actifs = Employee.objects.filter(work_status='active').count()
-        conges_en_attente = Leave.objects.filter(status='pending').count()
-        absences_jour = Attendance.objects.filter(
-            date=aujourd_hui, is_absent=True).count()
-
-        # Dernières activités
-        dernieres_ventes = Vente.objects.filter(agence__in=agences).order_by(
-            '-date_vente')[:5].values('reference', 'total', 'date_vente', 'client__nom')
-        derniers_achats = PurchaseOrder.objects.filter(agence__in=agences).order_by(
-            '-created_at')[:5].values('order_number', 'total', 'created_at', 'supplier__company_name')
-        alertes_recentes = StockAlert.objects.filter(warehouse__agence__in=agences, status='active').order_by(
-            '-created_at')[:5].values('product__name', 'message', 'created_at')
+        periode = request.query_params.get('periode', 'mois')
 
         data = {
-            'total_agences': total_agences,
-            'total_utilisateurs': total_utilisateurs,
-            'total_produits': total_produits,
-            'total_fournisseurs': total_fournisseurs,
-            'total_employes': total_employes,
-            'total_ca': total_ca,
-            'ca_jour': ca_jour,
-            'ca_mois': ca_mois,
-            'ventes_en_attente': ventes_en_attente,
-            'impayes': impayes,
-            'total_achats': total_achats,
-            'commandes_encours': commandes_encours,
-            'commandes_retard': commandes_retard,
-            'valeur_stock': valeur_stock,
-            'alertes_stock': alertes_stock,
-            'transferts_encours': transferts_encours,
-            'employes_actifs': employes_actifs,
-            'conges_en_attente': conges_en_attente,
-            'absences_jour': absences_jour,
-            'dernieres_ventes': list(dernieres_ventes),
-            'derniers_achats': list(derniers_achats),
-            'alertes_recentes': list(alertes_recentes),
+            'periode': periode,
+            'agences_ids': agences_ids,
+
+            # ===== STATS GLOBALES PAR MODULE =====
+            'stats_globales': {
+                'produits': utils.get_stats_produits(agences_ids),
+                'inventaire': utils.get_stats_inventaire(agences_ids),
+                'ventes': utils.get_stats_ventes(agences_ids, periode),
+                'achats': utils.get_stats_achats(agences_ids, periode),
+                'tresorerie': utils.get_stats_tresorerie(agences_ids, periode),
+                'comptabilite': utils.get_stats_comptabilite(agences_ids, periode),
+                'rh': utils.get_stats_rh(),
+                'utilisateurs': utils.get_stats_utilisateurs(),
+            },
+
+            # ===== DONNÉES GRAPHIQUES TEMPORELLES =====
+            'recettes_par_mois': utils.get_recettes_par_mois(agences_ids),
+            'depenses_par_mois': utils.get_depenses_par_mois(agences_ids),
+
+            # ===== ✅ TOUS LES GRAPHIQUES CIRCULAIRES, BARRES ET LIGNES =====
+            'charts': charts.get_all_charts(agences_ids, periode),
+
+            # ===== TOP / CLASSEMENTS =====
+            'top_produits': utils.get_top_produits_vendus(agences_ids),
+            'top_clients': utils.get_top_clients(agences_ids),
+            'top_fournisseurs': utils.get_top_fournisseurs(agences_ids),
+
+            # ===== ACTIVITÉS RÉCENTES =====
+            'dernieres_activites': utils.get_dernieres_activites(agences_ids),
+
+            # ===== ALERTES =====
+            'alertes': utils.get_alertes_globales(agences_ids),
         }
 
-        serializer = DashboardOverviewSerializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        return Response(serializer.data)
+        return Response(data)
 
-    @action(detail=False, methods=['get'])
-    def alertes_stock(self, request):
-        """Liste des alertes de stock actives."""
-        user = request.user
-        agences = self.get_agences(user)
-        alertes = StockAlert.objects.filter(
-            warehouse__agence__in=agences,
-            status='active'
-        ).select_related('product', 'warehouse')
-
-        data = [
-            {
-                'produit': a.product.name,
-                'stock': a.current_quantity,
-                'seuil': a.threshold,
-                'agence': a.warehouse.agence.nom,
-                'message': a.message,
-                'created_at': a.created_at
-            }
-            for a in alertes
-        ]
-        serializer = AlertesStockSerializer(data, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def stats_rh(self, request):
-        """Statistiques RH (réservé PDG/DRH)."""
-        if not (request.user.est_pdg() or request.user.est_drh()):
-            return Response({"detail": "Accès réservé."}, status=status.HTTP_403_FORBIDDEN)
-
-        total = Employee.objects.count()
-        actifs = Employee.objects.filter(work_status='active').count()
-        par_departement = Employee.objects.values(
-            'department__name').annotate(count=Count('id'))
-        conges = Leave.objects.filter(status='pending').count()
-        today = timezone.now().date()
-        presents = Attendance.objects.filter(
-            date=today, check_in_time__isnull=False).count()
-        absents = Attendance.objects.filter(date=today, is_absent=True).count()
+    # ============================================================
+    # GET /dashboard/stats/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        """
+        Statistiques rapides (sans les données lourdes).
+        """
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         return Response({
-            'total_employes': total,
-            'actifs': actifs,
-            'par_departement': list(par_departement),
-            'conges_en_attente': conges,
-            'presents_aujourdhui': presents,
-            'absents_aujourdhui': absents,
+            'produits': utils.get_stats_produits(agences_ids),
+            'ventes': utils.get_stats_ventes(agences_ids, 'jour'),
+            'achats': utils.get_stats_achats(agences_ids, 'jour'),
+            'tresorerie': utils.get_stats_tresorerie(agences_ids, 'jour'),
+            'alertes_count': len(utils.get_alertes_globales(agences_ids)),
         })
+
+    # ============================================================
+    # GET /dashboard/charts/?type=recettes&nb_mois=12
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='charts')
+    def charts(self, request):
+        """
+        Données pour les graphiques.
+
+        Query params:
+        - type: 
+            TEMPOREL: 'recettes', 'depenses', 'evolution_tresorerie'
+            CIRCULAIRE: 'ventes_par_statut', 'produits_par_categorie',
+                        'stock_par_entrepot', 'clients_par_type',
+                        'mouvements_par_type', 'transferts_par_statut',
+                        'factures_par_statut', 'achats_par_statut',
+                        'employes_par_departement', 'utilisateurs_par_role',
+                        'ca_par_agence', 'depenses_par_categorie',
+                        'tresorerie', 'alertes', 'rh_par_statut'
+            BARRES: 'top_produits_bar', 'ventes_vs_achats'
+            TOUS: 'all' (défaut)
+        - nb_mois: nombre de mois (défaut: 12)
+        - periode: 'jour', 'semaine', 'mois', 'trimestre', 'annee'
+        """
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        chart_type = request.query_params.get('type', 'all')
+        nb_mois = int(request.query_params.get('nb_mois', 12))
+        periode = request.query_params.get('periode', 'mois')
+
+        # ✅ TOUS les graphiques en un seul appel
+        if chart_type == 'all':
+            return Response(charts.get_all_charts(agences_ids, periode))
+
+        # ===== Graphiques temporels =====
+        if chart_type == 'recettes':
+            return Response(utils.get_recettes_par_mois(agences_ids, nb_mois))
+        if chart_type == 'depenses':
+            return Response(utils.get_depenses_par_mois(agences_ids, nb_mois))
+        if chart_type == 'evolution_tresorerie':
+            return Response(charts.get_evolution_tresorerie(agences_ids))
+
+        # ===== Graphiques circulaires =====
+        chart_functions = {
+            'ventes_par_statut': charts.get_repartition_ventes_par_statut,
+            'produits_par_categorie': charts.get_repartition_produits_par_categorie,
+            'stock_par_entrepot': charts.get_repartition_stock_par_entrepot,
+            'clients_par_type': charts.get_repartition_clients_par_type,
+            'mouvements_par_type': charts.get_repartition_mouvements_par_type,
+            'transferts_par_statut': charts.get_repartition_transferts_par_statut,
+            'factures_par_statut': charts.get_repartition_factures_par_statut,
+            'achats_par_statut': charts.get_repartition_achats_par_statut,
+            'employes_par_departement': charts.get_repartition_employes_par_departement,
+            'utilisateurs_par_role': charts.get_repartition_utilisateurs_par_role,
+            'ca_par_agence': charts.get_repartition_ca_par_agence,
+            'tresorerie': charts.get_repartition_tresorerie,
+            'alertes': charts.get_repartition_alertes,
+            'rh_par_statut': charts.get_repartition_rh,
+        }
+
+        if chart_type in chart_functions:
+            return Response(chart_functions[chart_type](agences_ids))
+
+        # Graphiques avec période
+        if chart_type == 'depenses_par_categorie':
+            return Response(
+                charts.get_repartition_depenses_par_categorie(
+                    agences_ids, periode)
+            )
+
+        # ===== Graphiques à barres =====
+        if chart_type == 'top_produits_bar':
+            return Response(charts.get_top_produits_bar(agences_ids))
+        if chart_type == 'ventes_vs_achats':
+            return Response(charts.get_ventes_vs_achats_bar(agences_ids))
+
+        # ===== Fallback : anciens types =====
+        if chart_type == 'top_produits':
+            return Response(utils.get_top_produits_vendus(agences_ids))
+        if chart_type == 'top_clients':
+            return Response(utils.get_top_clients(agences_ids))
+        if chart_type == 'top_fournisseurs':
+            return Response(utils.get_top_fournisseurs(agences_ids))
+
+        return Response(
+            {'error': f'Type de graphique inconnu: {chart_type}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ============================================================
+    # GET /dashboard/charts-circulaires/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='charts-circulaires')
+    def charts_circulaires(self, request):
+        """
+        Retourne UNIQUEMENT les graphiques circulaires (Pie / Doughnut).
+        Idéal pour un rendu rapide sans les autres données.
+        """
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        periode = request.query_params.get('periode', 'mois')
+
+        return Response({
+            'ventes_par_statut': charts.get_repartition_ventes_par_statut(agences_ids),
+            'produits_par_categorie': charts.get_repartition_produits_par_categorie(agences_ids),
+            'stock_par_entrepot': charts.get_repartition_stock_par_entrepot(agences_ids),
+            'clients_par_type': charts.get_repartition_clients_par_type(agences_ids),
+            'mouvements_par_type': charts.get_repartition_mouvements_par_type(agences_ids),
+            'transferts_par_statut': charts.get_repartition_transferts_par_statut(agences_ids),
+            'factures_par_statut': charts.get_repartition_factures_par_statut(agences_ids),
+            'achats_par_statut': charts.get_repartition_achats_par_statut(agences_ids),
+            'employes_par_departement': charts.get_repartition_employes_par_departement(agences_ids),
+            'utilisateurs_par_role': charts.get_repartition_utilisateurs_par_role(),
+            'ca_par_agence': charts.get_repartition_ca_par_agence(agences_ids),
+            'depenses_par_categorie': charts.get_repartition_depenses_par_categorie(agences_ids, periode),
+            'tresorerie': charts.get_repartition_tresorerie(agences_ids),
+            'alertes': charts.get_repartition_alertes(agences_ids),
+            'rh_par_statut': charts.get_repartition_rh(agences_ids),
+        })
+
+    # ============================================================
+    # GET /dashboard/charts-barres/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='charts-barres')
+    def charts_barres(self, request):
+        """
+        Retourne UNIQUEMENT les graphiques à barres.
+        """
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return Response({
+            'top_produits_bar': charts.get_top_produits_bar(agences_ids),
+            'ventes_vs_achats': charts.get_ventes_vs_achats_bar(agences_ids),
+        })
+
+    # ============================================================
+    # GET /dashboard/charts-lignes/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='charts-lignes')
+    def charts_lignes(self, request):
+        """
+        Retourne UNIQUEMENT les graphiques en ligne.
+        """
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return Response({
+            'evolution_tresorerie': charts.get_evolution_tresorerie(agences_ids),
+        })
+
+    # ============================================================
+    # GET /dashboard/alertes/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='alertes')
+    def alertes(self, request):
+        """Alertes uniquement."""
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        alertes = utils.get_alertes_globales(agences_ids)
+        return Response({
+            'total': len(alertes),
+            'alertes': alertes,
+        })
+
+    # ============================================================
+    # GET /dashboard/modules/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='modules')
+    def modules(self, request):
+        """
+        Statut de chaque module pour affichage rapide.
+        """
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response(
+                {'error': 'Accès non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        periode = request.query_params.get('periode', 'mois')
+
+        produits = utils.get_stats_produits(agences_ids)
+        inventaire = utils.get_stats_inventaire(agences_ids)
+        ventes = utils.get_stats_ventes(agences_ids, periode)
+        achats = utils.get_stats_achats(agences_ids, periode)
+        tresorerie = utils.get_stats_tresorerie(agences_ids, periode)
+        comptabilite = utils.get_stats_comptabilite(agences_ids, periode)
+        rh = utils.get_stats_rh()
+        utilisateurs = utils.get_stats_utilisateurs()
+
+        return Response({
+            'produits': {
+                'total': produits['total'],
+                'actifs': produits['actifs'],
+                'stock_faible': produits['stock_faible'],
+                'rupture': produits['rupture'],
+                'icone': 'Package',
+                'route': '/produits',
+            },
+            'inventaire': {
+                'entrepots': inventaire['entrepots'],
+                'transferts_en_attente': inventaire['transferts_en_attente'],
+                'alertes': inventaire['alertes_actives'],
+                'lots_expirant': inventaire['lots_expirant_bientot'],
+                'icone': 'Warehouse',
+                'route': '/inventaire',
+            },
+            'ventes': {
+                'total': ventes['ventes_total'],
+                'ca': float(ventes['ca_total']),
+                'en_attente': ventes['ventes_en_attente'],
+                'impayes': float(ventes['impayes']),
+                'icone': 'ShoppingCart',
+                'route': '/ventes',
+            },
+            'achats': {
+                'total': achats['commandes_total'],
+                'montant': float(achats['montant_total_achats']),
+                'en_attente': achats['commandes_en_attente'],
+                'en_retard': achats['commandes_en_retard'],
+                'icone': 'Truck',
+                'route': '/achats',
+            },
+            'tresorerie': {
+                'solde': float(tresorerie['solde_global']),
+                'caisses': tresorerie['nb_caisses'],
+                'comptes': tresorerie['nb_comptes'],
+                'alertes': tresorerie['caisses_sous_seuil'],
+                'icone': 'Wallet',
+                'route': '/tresorerie',
+            },
+            'comptabilite': {
+                'ecritures': comptabilite['ecritures_total'],
+                'factures_clients': comptabilite['factures_clients'],
+                'factures_fournisseurs': comptabilite['factures_fournisseurs'],
+                'impayes': float(comptabilite['montant_clients_impayes']),
+                'icone': 'Calculator',
+                'route': '/comptabilite',
+            },
+            'rh': {
+                'employes': rh['employes_total'],
+                'actifs': rh['employes_actifs'],
+                'conges_en_attente': rh['conges_en_attente'],
+                'paie_mois': float(rh['paie_mois']),
+                'icone': 'Users',
+                'route': '/rh',
+            },
+            'utilisateurs': {
+                'total': utilisateurs['utilisateurs_total'],
+                'actifs': utilisateurs['utilisateurs_actifs'],
+                'agences': utilisateurs['agences_total'],
+                'icone': 'UserCog',
+                'route': '/utilisateurs',
+            },
+        })
+
+    # ============================================================
+    # GET /dashboard/export/
+    # ============================================================
+    @action(detail=False, methods=['get'], url_path='export')
+    def export(self, request):
+        """Export complet du dashboard."""
+        return self.global_view(request)
 
 
 class StatistiquesViewSet(viewsets.ViewSet):
     """
-    Statistiques détaillées : ventes mensuelles, top produits, etc.
+    ViewSet pour les statistiques par module.
+
+    Endpoints :
+    - GET /statistiques/produits/
+    - GET /statistiques/inventaire/
+    - GET /statistiques/ventes/
+    - GET /statistiques/achats/
+    - GET /statistiques/tresorerie/
+    - GET /statistiques/comptabilite/
+    - GET /statistiques/rh/
+    - GET /statistiques/utilisateurs/
     """
-    permission_classes = [IsAuthenticated, IsChefAgenceOrAbove]
+    permission_classes = [IsAuthenticated, HasAgenceAccess]
 
-    def get_agences(self, user):
-        if user.est_pdg() or user.est_drh():
-            return Agence.objects.filter(est_active=True)
-        return user.get_agences()
-
-    @action(detail=False, methods=['get'])
-    def ventes_mensuelles(self, request):
-        """Ventes par mois sur 12 mois."""
+    def _get_agences_ids(self, request):
         user = request.user
-        agences = self.get_agences(user)
-        today = timezone.now().date()
-        start_date = today - timedelta(days=365)
+        agence_id = request.query_params.get('agence_id')
 
-        # Version compatible SQLite
-        # On récupère les ventes et on les groupe par mois en Python (car SQLite n'a pas DATE_TRUNC)
-        ventes = Vente.objects.filter(
-            agence__in=agences,
-            status='completed',
-            date_vente__date__gte=start_date
-        ).values('date_vente__year', 'date_vente__month').annotate(
-            total=Sum('total')
-        ).order_by('date_vente__year', 'date_vente__month')
+        if agence_id:
+            if not user.peut_acceder_agence(int(agence_id)):
+                return None
+            return [int(agence_id)]
 
-        result = []
-        for v in ventes:
-            year = v['date_vente__year']
-            month = v['date_vente__month']
-            mois = f"{year}-{month:02d}"
-            result.append({
-                'mois': mois,
-                'total': v['total']
-            })
+        agences_ids = utils.get_agences_ids(user)
+        if not agences_ids and not (user.est_pdg() or user.est_drh()):
+            return []
+        return agences_ids
 
-        # Si aucune donnée, on renvoie un tableau vide
-        serializer = VentesParMoisSerializer(result, many=True)
-        return Response(serializer.data)
+    @action(detail=False, methods=['get'], url_path='produits')
+    def produits(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        return Response(utils.get_stats_produits(agences_ids))
 
-    @action(detail=False, methods=['get'])
-    def top_produits(self, request):
-        """Top 10 produits en quantité vendue."""
-        user = request.user
-        agences = self.get_agences(user)
+    @action(detail=False, methods=['get'], url_path='inventaire')
+    def inventaire(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        return Response(utils.get_stats_inventaire(agences_ids))
 
-        top = VenteItem.objects.filter(
-            vente__agence__in=agences,
-            vente__status='completed'
-        ).values('product__name').annotate(
-            quantite=Sum('quantity'),
-            total=Sum('total')
-        ).order_by('-quantite')[:10]
+    @action(detail=False, methods=['get'], url_path='ventes')
+    def ventes(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        periode = request.query_params.get('periode', 'mois')
+        return Response(utils.get_stats_ventes(agences_ids, periode))
 
-        # Adapter aux champs attendus par le frontend
-        result = [
-            {'produit': item['product__name'] or 'Produit inconnu',
-             'quantite': item['quantite'],
-             'total': item['total']}
-            for item in top
-        ]
-        return Response(result)
+    @action(detail=False, methods=['get'], url_path='achats')
+    def achats(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        periode = request.query_params.get('periode', 'mois')
+        return Response(utils.get_stats_achats(agences_ids, periode))
 
-    @action(detail=False, methods=['get'])
-    def ventes_par_categorie(self, request):
-        """CA par catégorie."""
-        user = request.user
-        agences = self.get_agences(user)
+    @action(detail=False, methods=['get'], url_path='tresorerie')
+    def tresorerie(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        periode = request.query_params.get('periode', 'mois')
+        return Response(utils.get_stats_tresorerie(agences_ids, periode))
 
-        data = VenteItem.objects.filter(
-            vente__agence__in=agences,
-            vente__status='completed'
-        ).values('product__category__name').annotate(
-            total=Sum('total')
-        ).order_by('-total')
-        return Response(data)
+    @action(detail=False, methods=['get'], url_path='comptabilite')
+    def comptabilite(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        periode = request.query_params.get('periode', 'mois')
+        return Response(utils.get_stats_comptabilite(agences_ids, periode))
 
+    @action(detail=False, methods=['get'], url_path='rh')
+    def rh(self, request):
+        return Response(utils.get_stats_rh())
 
-try:
-    from produits.models import ProductPricing
-    HAS_PRICING = True
-except ImportError:
-    HAS_PRICING = False
-
-# analyses/views.py
-# Version complète et professionnelle du AnalysesViewSet
-
-
-# Logger pour le suivi des erreurs
-logger = logging.getLogger(__name__)
-
-# Essayer d'importer ProductPricing si disponible
-try:
-    from produits.models import ProductPricing
-    HAS_PRICING = True
-except ImportError:
-    HAS_PRICING = False
+    @action(detail=False, methods=['get'], url_path='utilisateurs')
+    def utilisateurs(self, request):
+        return Response(utils.get_stats_utilisateurs())
 
 
 class AnalysesViewSet(viewsets.ViewSet):
     """
-    Analyses avancées : tendances, prévisions, marges.
+    ViewSet pour les analyses et rapports.
 
-    ✅ Permission : accessible aux chefs d'agence, DRH et PDG.
-    ❌ Anciennement réservé aux PDG/DRH (IsPDGOrDRH) – élargi pour les chefs d'agence.
+    Endpoints :
+    - GET /analyses/top-produits/
+    - GET /analyses/top-clients/
+    - GET /analyses/top-fournisseurs/
+    - GET /analyses/activites/
+    - GET /analyses/comparaison/
     """
+    permission_classes = [IsAuthenticated, HasAgenceAccess]
 
-    # ============================================================
-    # PERMISSIONS
-    # ============================================================
-    permission_classes = [IsAuthenticated, IsChefAgenceOrAbove]
+    def _get_agences_ids(self, request):
+        user = request.user
+        agence_id = request.query_params.get('agence_id')
 
-    # ============================================================
-    # 1. TENDANCE DES VENTES (6 mois)
-    # ============================================================
-    @action(detail=False, methods=['get'])
-    def tendance_ventes(self, request):
-        """
-        Évolution des ventes sur les 6 derniers mois.
-        Compatible avec SQLite (pas de DATE_TRUNC).
-        Retourne une liste de {mois: 'YYYY-MM', total: float}.
-        """
-        try:
-            today = timezone.now().date()
-            start_date = today - timedelta(days=180)
+        if agence_id:
+            if not user.peut_acceder_agence(int(agence_id)):
+                return None
+            return [int(agence_id)]
 
-            # Agrégation par année/mois (SQLite compatible)
-            ventes = (
-                Vente.objects
-                .filter(status='completed', date_vente__date__gte=start_date)
-                .values('date_vente__year', 'date_vente__month')
-                .annotate(total=Sum('total'))
-                .order_by('date_vente__year', 'date_vente__month')
-            )
+        agences_ids = utils.get_agences_ids(user)
+        if not agences_ids and not (user.est_pdg() or user.est_drh()):
+            return []
+        return agences_ids
 
-            result = []
-            for v in ventes:
-                year = v['date_vente__year']
-                month = v['date_vente__month']
-                mois = f"{year}-{month:02d}"
-                # Sécurisation : si total est None, on met 0.0
-                total = float(v['total']) if v['total'] is not None else 0.0
-                result.append({'mois': mois, 'total': total})
+    @action(detail=False, methods=['get'], url_path='top-produits')
+    def top_produits(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        limit = int(request.query_params.get('limit', 10))
+        return Response(utils.get_top_produits_vendus(agences_ids, limit))
 
-            return Response(result)
+    @action(detail=False, methods=['get'], url_path='top-clients')
+    def top_clients(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        limit = int(request.query_params.get('limit', 10))
+        return Response(utils.get_top_clients(agences_ids, limit))
 
-        except Exception as e:
-            logger.error(f"Erreur dans tendance_ventes : {e}", exc_info=True)
-            return Response(
-                {"error": "Erreur interne lors du calcul de la tendance"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+    @action(detail=False, methods=['get'], url_path='top-fournisseurs')
+    def top_fournisseurs(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        limit = int(request.query_params.get('limit', 10))
+        return Response(utils.get_top_fournisseurs(agences_ids, limit))
 
-    # ============================================================
-    # 2. MARGE MOYENNE PAR PRODUIT
-    # ============================================================
-    @action(detail=False, methods=['get'])
-    def marge_moyenne(self, request):
-        """
-        Calcule la marge moyenne (prix de vente - prix d'achat) pour chaque produit.
-        Nécessite que le champ purchase_price existe dans Product.
-        """
-        try:
-            # Vérifier la présence du champ purchase_price
-            if not hasattr(Product, 'purchase_price'):
-                logger.warning(
-                    "Le champ purchase_price n'existe pas dans Product")
-                return Response(
-                    {"error": "Le champ purchase_price n'existe pas dans le modèle Product."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+    @action(detail=False, methods=['get'], url_path='activites')
+    def activites(self, request):
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
+        limit = int(request.query_params.get('limit', 10))
+        return Response(utils.get_dernieres_activites(agences_ids, limit))
 
-            # Agrégation
-            ventes_items = (
-                VenteItem.objects
-                .filter(vente__status='completed')
-                .values('product__name')
-                .annotate(
-                    marge_moyenne=Avg(F('prix_unitaire') -
-                                      F('product__purchase_price'))
-                )
-                .order_by('-marge_moyenne')[:20]
-            )
+    @action(detail=False, methods=['get'], url_path='comparaison')
+    def comparaison(self, request):
+        """Comparaison CA vs Dépenses sur la période."""
+        agences_ids = self._get_agences_ids(request)
+        if agences_ids is None:
+            return Response({'error': 'Accès non autorisé'}, status=403)
 
-            # Convertir Decimal en float pour JSON
-            for item in ventes_items:
-                if item['marge_moyenne'] is not None:
-                    item['marge_moyenne'] = float(item['marge_moyenne'])
+        recettes = utils.get_recettes_par_mois(agences_ids)
+        depenses = utils.get_depenses_par_mois(agences_ids)
 
-            return Response(ventes_items)
-
-        except Exception as e:
-            logger.error(f"Erreur dans marge_moyenne : {e}", exc_info=True)
-            return Response(
-                {"error": "Erreur lors du calcul des marges"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    # ============================================================
-    # 3. PRÉVISIONS DE RUPTURE DE STOCK
-    # ============================================================
-    @action(detail=False, methods=['get'])
-    def prevision_stock(self, request):
-        """
-        Identifie les produits risquant une rupture de stock dans les 15 jours.
-        Se base sur la consommation moyenne des 30 derniers jours.
-        Retourne une liste de produits avec jours restants estimés.
-        """
-        try:
-            from django.db.models import Sum
-            today = timezone.now().date()
-            start_date = today - timedelta(days=30)
-
-            # Consommation par produit sur 30 jours
-            consommation = (
-                VenteItem.objects
-                .filter(vente__status='completed', vente__date_vente__date__gte=start_date)
-                .values('product_id')
-                .annotate(total_vendu=Sum('quantity'))
-            )
-
-            # Dictionnaire de consommation
-            conso_dict = {c['product_id']: c['total_vendu']
-                          for c in consommation}
-
-            # Stocks actuels (uniquement les produits avec stock > 0)
-            stocks = WarehouseStock.objects.filter(
-                quantity__gt=0).select_related('product')
-
-            previsions = []
-            for stock in stocks:
-                conso = conso_dict.get(stock.product.id, 0)
-                if conso > 0:
-                    jours_restants = stock.quantity / conso * 30
-                    if jours_restants < 15:
-                        previsions.append({
-                            'produit': stock.product.name,
-                            'stock': stock.quantity,
-                            'conso_mensuelle': conso,
-                            'jours_restants': round(jours_restants, 1)
-                        })
-
-            return Response(previsions)
-
-        except Exception as e:
-            logger.error(f"Erreur dans prevision_stock : {e}", exc_info=True)
-            return Response(
-                {"error": "Erreur lors du calcul des prévisions de stock"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        return Response({
+            'recettes': recettes,
+            'depenses': depenses,
+        })
