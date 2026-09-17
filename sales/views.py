@@ -87,9 +87,12 @@ class ClientViewSet(viewsets.ModelViewSet):
 logger = logging.getLogger(__name__)
 
 
+# sales/views.py - VENTEVIEWSET COMPLET AVEC PAIEMENT AUTOMATIQUE
+
 class VenteViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des ventes - SANS TVA
+    Inclut la fonctionnalité de paiement automatique
     """
     permission_classes = [IsAuthenticated, HasAgenceAccess]
     filter_backends = [DjangoFilterBackend,
@@ -113,6 +116,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             return Vente.objects.filter(agence__in=user.get_agences())
         return Vente.objects.filter(vendeur=user)
 
+    # ============================================================
+    # ACTION : VENTES SANS FACTURE
+    # ============================================================
     @action(detail=False, methods=['get'])
     def sans_facture(self, request):
         """
@@ -128,6 +134,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             queryset, many=True, context={'request': request})
         return Response(serializer.data)
 
+    # ============================================================
+    # ACTION : PRIX DES PRODUITS
+    # ============================================================
     @action(detail=False, methods=['get'])
     def product_prices(self, request):
         """
@@ -167,6 +176,9 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    # ============================================================
+    # ACTION : SOUMETTRE UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def submit(self, request, pk=None):
@@ -246,6 +258,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             'data': VenteDetailSerializer(vente).data
         })
 
+    # ============================================================
+    # ACTION : APPROUVER UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def approve(self, request, pk=None):
@@ -466,6 +481,9 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         return Response(response_data)
 
+    # ============================================================
+    # ACTION : REJETER UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         """
@@ -496,6 +514,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             'data': VenteDetailSerializer(vente).data
         })
 
+    # ============================================================
+    # ACTION : COMPLÉTER UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
         """
@@ -525,6 +546,9 @@ class VenteViewSet(viewsets.ModelViewSet):
             'data': VenteDetailSerializer(vente).data
         })
 
+    # ============================================================
+    # ACTION : ANNULER UNE VENTE
+    # ============================================================
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def cancel(self, request, pk=None):
@@ -547,22 +571,6 @@ class VenteViewSet(viewsets.ModelViewSet):
             reference_id=vente.id
         )
 
-        # Restaurer les lots à partir des mouvements (si on a stocké le lot dans le mouvement)
-        # Sinon, on ne peut pas restaurer précisément les lots. On peut soit :
-        # - ajouter un champ `lot` dans StockMovement
-        # - ou recréer les lots à partir des items (si on a stocké le lot dans VenteItem)
-        # Ici on suppose que le champ `lot` a été ajouté à StockMovement (optionnel)
-        # Pour l'instant, on restaure seulement le stock global.
-
-        # On peut récupérer les lots prélevés via les items (si lot est stocké dans VenteItem)
-        # Mais si on a fait du FIFO sur plusieurs lots, on n'a pas de trace directe.
-        # Donc pour une restauration précise, il faut stocker le lot dans StockMovement.
-
-        # Si on n'a pas le lot dans les mouvements, on ne peut pas restaurer les lots précisément.
-        # On va au moins restaurer le stock global (WarehouseStock) et on avertit.
-        # On pourrait simplement ajouter une validation pour empêcher l'annulation si on veut une traçabilité parfaite.
-
-        # On peut aussi récupérer les lots depuis VenteItem (si le lot a été fixé)
         for item in vente.items.filter(stock_preleve=True):
             key = f"{item.product.id}_{item.variant.id if item.variant else 'None'}"
             if key not in stock_restauration:
@@ -579,10 +587,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 item.lot.quantity += item.quantity
                 item.lot.save()
 
-        # Pour les cas sans lot spécifique, on ne peut pas restaurer les lots.
-        # On peut soit créer un mouvement d'entrée global sans lot, soit lever une erreur.
-        # On crée un mouvement d'entrée pour chaque produit.
-
         for key, group in stock_restauration.items():
             if group['warehouse']:
                 # Créer un mouvement d'entrée pour restaurer le stock global
@@ -594,7 +598,7 @@ class VenteViewSet(viewsets.ModelViewSet):
                     variant=group['variant'],
                     quantity=group['total_quantity'],
                     to_warehouse=group['warehouse'],
-                    unit_price=0,  # Prix non applicable
+                    unit_price=0,
                     notes=f"Annulation vente {vente.reference} - {group['total_quantity']} unités restituées (sans lot précis)",
                     created_by=request.user
                 )
@@ -635,6 +639,206 @@ class VenteViewSet(viewsets.ModelViewSet):
             'data': VenteDetailSerializer(vente).data
         })
 
+    # ============================================================
+    # ✅ NOUVELLE ACTION : MARQUER COMME PAYÉ (PAIEMENT AUTOMATIQUE)
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def marquer_paye(self, request, pk=None):
+        """
+        Marque une vente comme payée automatiquement.
+
+        Cette action :
+        1. Crée une facture si elle n'existe pas
+        2. Crée un paiement pour le montant total restant
+        3. Le modèle Paiement crée automatiquement le mouvement de trésorerie
+        4. Met à jour le statut de la facture à 'paid'
+        5. Met à jour le statut de la vente (est_paye=True)
+
+        Paramètres optionnels (body JSON):
+        - methode: 'especes' | 'carte' | 'cheque' | 'virement' | 'mobile_money' | 'autre' (défaut: 'especes')
+        - reference_externe: string (optionnel)
+        - notes: string (optionnel)
+        - caisse_destination: int (ID de la caisse, optionnel)
+        - compte_destination: int (ID du compte bancaire, optionnel)
+        """
+        vente = self.get_object()
+        user = request.user
+
+        # =================== VÉRIFICATIONS ===================
+        if vente.status not in ['approved', 'completed']:
+            return Response(
+                {
+                    'error': f'Seule une vente approuvée ou complétée peut être marquée comme payée. '
+                    f'Statut actuel: {vente.get_status_display()}'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if vente.est_paye:
+            return Response(
+                {'error': 'Cette vente est déjà entièrement payée'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # =================== RÉCUPÉRER OU CRÉER LA FACTURE ===================
+        facture = Facture.objects.filter(vente=vente).first()
+
+        if not facture:
+            # Créer la facture si elle n'existe pas
+            date_echeance = timezone.now().date() + timezone.timedelta(days=30)
+            facture = Facture.objects.create(
+                vente=vente,
+                client=vente.client,
+                agence=vente.agence,
+                cree_par=user,
+                type_facture='finale',
+                date_facture=timezone.now().date(),
+                date_echeance=date_echeance,
+                conditions_paiement='Paiement immédiat',
+                notes=f"Facture créée automatiquement lors du paiement de la vente {vente.reference}",
+                sous_total=vente.sous_total,
+                total_ttc=vente.total,
+                montant_paye=0,
+                montant_restant=vente.total
+            )
+            logger.info(
+                f"✅ Facture {facture.reference} créée automatiquement pour la vente {vente.reference}"
+            )
+
+        # =================== CALCULER LE MONTANT À PAYER ===================
+        montant_restant = facture.montant_restant
+
+        if montant_restant <= 0:
+            return Response(
+                {'error': 'Cette facture est déjà entièrement payée'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # =================== RÉCUPÉRER LES PARAMÈTRES ===================
+        methode = request.data.get('methode', 'especes')
+        reference_externe = request.data.get('reference_externe', '')
+        notes = request.data.get(
+            'notes', f'Paiement automatique - Vente {vente.reference}')
+        caisse_id = request.data.get('caisse_destination')
+        compte_id = request.data.get('compte_destination')
+
+        # Valider la méthode de paiement
+        methodes_valides = [m[0] for m in Paiement.METHODES_PAIEMENT]
+        if methode not in methodes_valides:
+            return Response(
+                {'error': f'Méthode de paiement invalide. Valeurs acceptées: {methodes_valides}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # =================== RÉCUPÉRER LA CAISSE / COMPTE ===================
+        caisse = None
+        compte = None
+
+        if caisse_id:
+            from tresorerie.models import Caisse
+            try:
+                caisse = Caisse.objects.get(id=caisse_id, agence=vente.agence)
+            except Caisse.DoesNotExist:
+                return Response(
+                    {'error': 'Caisse non trouvée ou n\'appartient pas à cette agence'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        if compte_id:
+            from tresorerie.models import CompteBancaire
+            try:
+                compte = CompteBancaire.objects.get(
+                    id=compte_id, agence=vente.agence)
+            except CompteBancaire.DoesNotExist:
+                return Response(
+                    {'error': 'Compte bancaire non trouvé ou n\'appartient pas à cette agence'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Si les deux sont spécifiés, erreur
+        if caisse and compte:
+            return Response(
+                {'error': 'Choisissez une seule destination : caisse ou compte bancaire'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # =================== CRÉER LE PAIEMENT ===================
+        try:
+            paiement = Paiement.objects.create(
+                facture=facture,
+                client=vente.client,
+                vente=vente,
+                montant=montant_restant,
+                methode=methode,
+                reference_externe=reference_externe,
+                notes=notes,
+                encaisse_par=user,
+                statut='completed',
+                caisse_destination=caisse,
+                compte_destination=compte
+            )
+
+            logger.info(
+                f"✅ Paiement {paiement.reference} créé pour la vente {vente.reference} "
+                f"(montant: {montant_restant} FCFA)"
+            )
+
+            # Rafraîchir les objets depuis la DB
+            vente.refresh_from_db()
+            facture.refresh_from_db()
+            paiement.refresh_from_db()
+
+            # =================== RÉPONSE ===================
+            return Response({
+                'success': True,
+                'message': f'Vente {vente.reference} marquée comme payée avec succès',
+                'paiement': {
+                    'id': paiement.id,
+                    'reference': paiement.reference,
+                    'montant': str(paiement.montant),
+                    'methode': paiement.methode,
+                    'methode_display': paiement.methode_display,
+                    'date_paiement': paiement.date_paiement,
+                    'statut': paiement.statut,
+                    'mouvement_tresorerie': paiement.mouvement_tresorerie.reference if paiement.mouvement_tresorerie else None
+                },
+                'facture': {
+                    'id': facture.id,
+                    'reference': facture.reference,
+                    'status': facture.status,
+                    'status_display': facture.get_status_display(),
+                    'montant_paye': str(facture.montant_paye),
+                    'montant_restant': str(facture.montant_restant)
+                },
+                'vente': {
+                    'id': vente.id,
+                    'reference': vente.reference,
+                    'status': vente.status,
+                    'est_paye': vente.est_paye,
+                    'montant_paye': str(vente.montant_paye),
+                    'montant_du': str(vente.montant_du)
+                }
+            }, status=status.HTTP_201_CREATED)
+
+        except ValidationError as e:
+            logger.error(
+                f"❌ Erreur de validation lors du paiement: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ Erreur lors de la création du paiement: {str(e)}")
+            return Response(
+                {'error': f'Erreur lors de la création du paiement: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # ============================================================
+    # ACTION : STATISTIQUES
+    # ============================================================
     @action(detail=False, methods=['get'])
     def stats(self, request):
         """
@@ -663,6 +867,40 @@ class VenteViewSet(viewsets.ModelViewSet):
             'annulees': ventes.filter(status='cancelled').count(),
             'impayes': ventes.filter(est_paye=False, status__in=['approved', 'completed']).aggregate(total=Sum('montant_du'))['total'] or 0
         })
+
+    # ============================================================
+    # ACTION : LISTE DES CAISSES DISPONIBLES POUR PAIEMENT
+    # ============================================================
+    @action(detail=True, methods=['get'])
+    def destinations_paiement(self, request, pk=None):
+        """
+        Récupère les caisses et comptes bancaires disponibles pour le paiement
+        """
+        vente = self.get_object()
+
+        try:
+            from tresorerie.models import Caisse, CompteBancaire
+
+            caisses = Caisse.objects.filter(
+                agence=vente.agence,
+                is_active=True
+            ).values('id', 'nom', 'code', 'type_caisse', 'solde_actuel', 'is_default')
+
+            comptes = CompteBancaire.objects.filter(
+                agence=vente.agence,
+                is_active=True
+            ).values('id', 'nom', 'numero_compte', 'banque', 'solde_actuel')
+
+            return Response({
+                'caisses': list(caisses),
+                'comptes_bancaires': list(comptes)
+            })
+        except ImportError:
+            return Response({
+                'caisses': [],
+                'comptes_bancaires': [],
+                'message': 'Module trésorerie non disponible'
+            })
 
 
 class PaiementViewSet(viewsets.ModelViewSet):
