@@ -1,3 +1,5 @@
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 
 # Create your models here.
@@ -77,7 +79,7 @@ class Caisse(models.Model):
                 agence=self.agence,
                 is_default=True
             ).exclude(pk=self.pk).update(is_default=False)
-        
+
         # ✅ Si cette caisse perd son statut par défaut ET qu'il n'y a pas d'autre caisse par défaut
         # ET qu'il existe d'autres caisses actives dans la même agence
         if not self.is_default:
@@ -86,14 +88,14 @@ class Caisse(models.Model):
                 agence=self.agence,
                 is_default=True
             ).exclude(pk=self.pk).exists()
-            
+
             # S'il n'y a pas d'autre caisse par défaut, mais qu'il y a d'autres caisses actives
             if not has_other_default:
                 other_active_caisse = Caisse.objects.filter(
                     agence=self.agence,
                     is_active=True
                 ).exclude(pk=self.pk).first()
-                
+
                 # Si une autre caisse active existe, la définir comme par défaut
                 if other_active_caisse:
                     other_active_caisse.is_default = True
@@ -104,7 +106,7 @@ class Caisse(models.Model):
                         f"✅ Caisse '{other_active_caisse.nom}' définie comme par défaut "
                         f"car '{self.nom}' a perdu ce statut"
                     )
-        
+
         super().save(*args, **kwargs)
 
     @property
@@ -183,6 +185,9 @@ class CompteBancaire(models.Model):
 
 # tresorerie/models.py
 
+# tresorerie/models.py
+
+
 class MouvementTresorerie(models.Model):
     """
     Mouvement de trésorerie (entrée ou sortie d'argent)
@@ -202,7 +207,9 @@ class MouvementTresorerie(models.Model):
         ('ecriture', 'Écriture comptable'),
         ('salaire', 'Salaire'),
         ('frais', 'Frais'),
-        ('payment', 'Paiement fournisseur'),  # ✅ AJOUT
+        ('payment', 'Paiement fournisseur'),
+        ('paiement', 'Paiement'),                    # ✅ AJOUT
+        ('paiement_client', 'Paiement client'),      # ✅ AJOUT
         ('caisse', 'Caisse'),
         ('compte_bancaire', 'Compte bancaire'),
         ('autre', 'Autre'),
@@ -214,6 +221,7 @@ class MouvementTresorerie(models.Model):
         ('cheque', 'Chèque'),
         ('virement', 'Virement'),
         ('mobile_money', 'Mobile Money'),
+        ('mobile', 'Mobile Money (court)'),          # ✅ AJOUT
         ('prelevement', 'Prélèvement'),
         ('autre', 'Autre'),
     )
@@ -228,33 +236,41 @@ class MouvementTresorerie(models.Model):
 
     reference = models.CharField(
         max_length=50, unique=True, verbose_name="Référence")
-    type_mouvement = models.CharField(
-        max_length=20, choices=TYPE_MOUVEMENT, verbose_name="Type de mouvement")
 
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='mouvements_tresorerie',
-                               verbose_name="Agence")
+    # ✅ max_length augmenté à 50 pour éviter les erreurs
+    type_mouvement = models.CharField(
+        max_length=50, choices=TYPE_MOUVEMENT, verbose_name="Type de mouvement")
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='mouvements_tresorerie', verbose_name="Agence")
 
     # Source du mouvement
+    # ✅ max_length augmenté à 50
     source_type = models.CharField(
-        max_length=20, choices=SOURCE_TYPE, verbose_name="Type source")
+        max_length=50, choices=SOURCE_TYPE, verbose_name="Type source")
     source_id = models.IntegerField(
         null=True, blank=True, verbose_name="ID source")
     source_reference = models.CharField(
         max_length=100, blank=True, null=True, verbose_name="Référence source")
 
     # Montant
-    montant = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)],
-                                  verbose_name="Montant")
+    montant = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        validators=[MinValueValidator(0)], verbose_name="Montant")
 
     # Mode de paiement
+    # ✅ max_length augmenté à 50
     mode_paiement = models.CharField(
-        max_length=20, choices=MODE_PAIEMENT, verbose_name="Mode de paiement")
+        max_length=50, choices=MODE_PAIEMENT, verbose_name="Mode de paiement")
 
     # Caisse ou compte bancaire
-    caisse = models.ForeignKey(Caisse, on_delete=models.SET_NULL, null=True, blank=True,
-                               related_name='mouvements', verbose_name="Caisse")
-    compte_bancaire = models.ForeignKey(CompteBancaire, on_delete=models.SET_NULL, null=True, blank=True,
-                                        related_name='mouvements', verbose_name="Compte bancaire")
+    caisse = models.ForeignKey(
+        'Caisse', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='mouvements', verbose_name="Caisse")
+    compte_bancaire = models.ForeignKey(
+        'CompteBancaire', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='mouvements', verbose_name="Compte bancaire")
 
     # Dates
     date_mouvement = models.DateTimeField(
@@ -264,14 +280,16 @@ class MouvementTresorerie(models.Model):
         null=True, blank=True, verbose_name="Date prévue")
 
     # Statut
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='planifie',
-                              verbose_name="Statut")
+    # ✅ max_length augmenté à 50
+    status = models.CharField(
+        max_length=50, choices=STATUS_CHOICES, default='planifie',
+        verbose_name="Statut")
 
     # Références externes
-    reference_externe = models.CharField(max_length=100, blank=True, null=True,
-                                         verbose_name="Référence externe")
-    piece_justificative = models.CharField(max_length=50, blank=True, null=True,
-                                           verbose_name="Pièce justificative")
+    reference_externe = models.CharField(
+        max_length=100, blank=True, null=True, verbose_name="Référence externe")
+    piece_justificative = models.CharField(
+        max_length=50, blank=True, null=True, verbose_name="Pièce justificative")
 
     # Rapprochement
     date_rapprochement = models.DateField(
@@ -283,16 +301,20 @@ class MouvementTresorerie(models.Model):
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
 
     # Lien vers l'écriture comptable
-    ecriture = models.ForeignKey('comptabilite.Ecriture', on_delete=models.SET_NULL, null=True, blank=True,
-                                 related_name='mouvements_tresorerie', verbose_name="Écriture comptable")
+    ecriture = models.ForeignKey(
+        'comptabilite.Ecriture', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='mouvements_tresorerie',
+        verbose_name="Écriture comptable")
 
     # Création et validation
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                   related_name='mouvements_tresorerie_crees', verbose_name="Créé par")
-    valide_par = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='mouvements_tresorerie_valides', verbose_name="Validé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='mouvements_tresorerie_crees', verbose_name="Créé par")
+    valide_par = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='mouvements_tresorerie_valides', verbose_name="Validé par")
     date_validation = models.DateTimeField(
         null=True, blank=True, verbose_name="Date validation")
 
@@ -341,9 +363,7 @@ class MouvementTresorerie(models.Model):
             )
 
         # ✅ Mettre à jour les soldes si le mouvement est effectué
-        # On le fait AVANT la sauvegarde pour que les soldes soient à jour
         if self.status == 'effectue':
-            # Si c'est une création ou un changement de statut vers 'effectue'
             if not self.pk:
                 # Nouveau mouvement
                 self._mettre_a_jour_soldes()
@@ -372,12 +392,12 @@ class MouvementTresorerie(models.Model):
                 elif self.type_mouvement == 'decaissement':
                     self.caisse.solde_actuel -= self.montant
                 self.caisse.save(update_fields=['solde_actuel', 'updated_at'])
-                
+
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.info(
                     f"✅ Caisse {self.caisse.nom} mise à jour: "
-                    f"{self.caisse.solde_actuel} ({(self.type_mouvement)} de {self.montant})"
+                    f"{self.caisse.solde_actuel} ({self.type_mouvement} de {self.montant})"
                 )
 
             if self.compte_bancaire:
@@ -385,19 +405,21 @@ class MouvementTresorerie(models.Model):
                     self.compte_bancaire.solde_actuel += self.montant
                 elif self.type_mouvement == 'decaissement':
                     self.compte_bancaire.solde_actuel -= self.montant
-                self.compte_bancaire.save(update_fields=['solde_actuel', 'updated_at'])
-                
+                self.compte_bancaire.save(
+                    update_fields=['solde_actuel', 'updated_at'])
+
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.info(
                     f"✅ Compte {self.compte_bancaire.nom} mis à jour: "
-                    f"{self.compte_bancaire.solde_actuel} ({(self.type_mouvement)} de {self.montant})"
+                    f"{self.compte_bancaire.solde_actuel} ({self.type_mouvement} de {self.montant})"
                 )
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
             logger.error(f"❌ Erreur mise à jour soldes: {str(e)}")
-            raise ValidationError(f"Erreur lors de la mise à jour des soldes: {str(e)}")
+            raise ValidationError(
+                f"Erreur lors de la mise à jour des soldes: {str(e)}")
 
     def _inverser_soldes(self):
         """
@@ -428,10 +450,10 @@ class MouvementTresorerie(models.Model):
     @property
     def est_transfert(self):
         return self.type_mouvement == 'transfert'
-
 # ============================================================
 # 4. FRAIS ET DÉPENSES
 # ============================================================
+
 
 class Frais(models.Model):
     """
