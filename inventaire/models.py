@@ -6,6 +6,8 @@ from users.models import CustomUser, Agence
 from produits.models import Product, ProductVariant
 
 
+# inventaire/models.py
+
 class Warehouse(models.Model):
     """Entrepôt / Magasin"""
     WAREHOUSE_TYPES = (
@@ -19,9 +21,13 @@ class Warehouse(models.Model):
 
     code = models.CharField(max_length=50, unique=True)
     name = models.CharField(max_length=200)
-    warehouse_type = models.CharField(max_length=20, choices=WAREHOUSE_TYPES, default='main')
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='warehouses', verbose_name="Agence associée")
+    warehouse_type = models.CharField(
+        max_length=20, choices=WAREHOUSE_TYPES, default='main')
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='warehouses', verbose_name="Agence associée"
+    )
 
     address = models.TextField()
     city = models.CharField(max_length=100)
@@ -30,31 +36,58 @@ class Warehouse(models.Model):
 
     phone = models.CharField(max_length=20, null=True, blank=True)
     email = models.EmailField(null=True, blank=True)
-    manager = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='managed_warehouses')
+    manager = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='managed_warehouses'
+    )
 
     is_active = models.BooleanField(default=True)
     is_default = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, related_name='created_warehouses')
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL,
+        null=True, related_name='created_warehouses'
+    )
 
     class Meta:
         ordering = ['name']
-        unique_together = ['agence', 'is_default']
+
+        # ✅ Contraintes :
+        # - code unique globalement
+        # - un seul entrepôt par défaut par agence
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code'],
+                name='unique_warehouse_code'
+            ),
+            models.UniqueConstraint(
+                fields=['agence'],
+                condition=models.Q(is_default=True),
+                name='unique_default_warehouse_per_agence'
+            ),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name} ({self.agence.nom})"
 
     def save(self, *args, **kwargs):
+        # ✅ Si cet entrepôt est défini comme par défaut,
+        # retirer le statut des autres entrepôts de la même agence
         if self.is_default:
-            Warehouse.objects.filter(agence=self.agence, is_default=True).update(is_default=False)
+            Warehouse.objects.filter(
+                agence=self.agence,
+                is_default=True
+            ).exclude(pk=self.pk).update(is_default=False)
+
         super().save(*args, **kwargs)
 
 
 class Location(models.Model):
     """Emplacement dans un entrepôt"""
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='locations')
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.CASCADE, related_name='locations')
     code = models.CharField(max_length=50)
     aisle = models.CharField(max_length=50, blank=True, null=True)
     rack = models.CharField(max_length=50, blank=True, null=True)
@@ -62,8 +95,10 @@ class Location(models.Model):
     bin = models.CharField(max_length=50, blank=True, null=True)
     description = models.CharField(max_length=200, blank=True, null=True)
     is_active = models.BooleanField(default=True)
-    max_weight = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, help_text="Poids maximum en kg")
-    max_volume = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, help_text="Volume maximum en m³")
+    max_weight = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, help_text="Poids maximum en kg")
+    max_volume = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, help_text="Volume maximum en m³")
 
     class Meta:
         unique_together = ['warehouse', 'code']
@@ -97,26 +132,36 @@ class StockMovement(models.Model):
 
     reference = models.CharField(max_length=100, unique=True)
     movement_type = models.CharField(max_length=20, choices=MOVEMENT_TYPES)
-    reference_type = models.CharField(max_length=20, choices=REFERENCE_TYPES, default='manual')
+    reference_type = models.CharField(
+        max_length=20, choices=REFERENCE_TYPES, default='manual')
     reference_id = models.IntegerField(null=True, blank=True)
 
-    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name='stock_movements')
-    variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_movements')
+    product = models.ForeignKey(
+        Product, on_delete=models.PROTECT, related_name='stock_movements')
+    variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL,
+                                null=True, blank=True, related_name='stock_movements')
 
     quantity = models.IntegerField(validators=[MinValueValidator(1)])
 
-    from_warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, null=True, blank=True, related_name='movements_out')
-    to_warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, null=True, blank=True, related_name='movements_in')
+    from_warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.PROTECT, null=True, blank=True, related_name='movements_out')
+    to_warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.PROTECT, null=True, blank=True, related_name='movements_in')
 
-    from_location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements_from')
-    to_location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements_to')
+    from_location = models.ForeignKey(
+        Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements_from')
+    to_location = models.ForeignKey(
+        Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements_to')
 
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
-    total_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    unit_price = models.DecimalField(
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    total_price = models.DecimalField(
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
 
     movement_date = models.DateTimeField(auto_now_add=True)
     notes = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, related_name='created_movements')
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, related_name='created_movements')
 
     class Meta:
         indexes = [
@@ -155,24 +200,32 @@ class Transfer(models.Model):
     )
 
     reference = models.CharField(max_length=100, unique=True)
-    from_agence = models.ForeignKey('users.Agence', on_delete=models.PROTECT, related_name='transfers_from', verbose_name="Agence source")
-    to_agence = models.ForeignKey('users.Agence', on_delete=models.PROTECT, related_name='transfers_to', verbose_name="Agence destination")
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    from_agence = models.ForeignKey('users.Agence', on_delete=models.PROTECT,
+                                    related_name='transfers_from', verbose_name="Agence source")
+    to_agence = models.ForeignKey('users.Agence', on_delete=models.PROTECT,
+                                  related_name='transfers_to', verbose_name="Agence destination")
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='draft')
     transfer_date = models.DateField(auto_now_add=True)
     expected_date = models.DateField(null=True, blank=True)
     completed_date = models.DateField(null=True, blank=True)
-    waybill = models.CharField(max_length=100, blank=True, null=True, help_text="Numéro de bon de livraison")
+    waybill = models.CharField(
+        max_length=100, blank=True, null=True, help_text="Numéro de bon de livraison")
     notes = models.TextField(blank=True, null=True)
-    created_by = models.ForeignKey('users.CustomUser', on_delete=models.SET_NULL, null=True, related_name='created_transfers')
-    validated_by = models.ForeignKey('users.CustomUser', on_delete=models.SET_NULL, null=True, blank=True, related_name='validated_transfers')
-    approved_by = models.ForeignKey('users.CustomUser', on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_transfers')
+    created_by = models.ForeignKey(
+        'users.CustomUser', on_delete=models.SET_NULL, null=True, related_name='created_transfers')
+    validated_by = models.ForeignKey(
+        'users.CustomUser', on_delete=models.SET_NULL, null=True, blank=True, related_name='validated_transfers')
+    approved_by = models.ForeignKey('users.CustomUser', on_delete=models.SET_NULL,
+                                    null=True, blank=True, related_name='approved_transfers')
     approved_at = models.DateTimeField(null=True, blank=True)
     rejected_reason = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        indexes = [models.Index(fields=['reference']), models.Index(fields=['status']), models.Index(fields=['from_agence', 'to_agence'])]
+        indexes = [models.Index(fields=['reference']), models.Index(
+            fields=['status']), models.Index(fields=['from_agence', 'to_agence'])]
         ordering = ['-created_at']
 
     def __str__(self):
@@ -191,12 +244,15 @@ class Transfer(models.Model):
 
 class TransferItem(models.Model):
     """Article dans un transfert"""
-    transfer = models.ForeignKey(Transfer, on_delete=models.CASCADE, related_name='items')
+    transfer = models.ForeignKey(
+        Transfer, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
+    variant = models.ForeignKey(
+        ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
     quantity = models.IntegerField(validators=[MinValueValidator(1)])
     quantity_received = models.IntegerField(default=0)
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    unit_price = models.DecimalField(
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     notes = models.CharField(max_length=200, blank=True, null=True)
 
     class Meta:
@@ -223,15 +279,20 @@ class InventoryCount(models.Model):
     )
 
     reference = models.CharField(max_length=100, unique=True)
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name='inventory_counts')
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.PROTECT, related_name='inventory_counts')
     count_date = models.DateField(auto_now_add=True)
     scheduled_date = models.DateField(null=True, blank=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
-    counted_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, related_name='inventory_counts')
-    validated_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='validated_counts')
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='draft')
+    counted_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, related_name='inventory_counts')
+    validated_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='validated_counts')
     total_items = models.IntegerField(default=0)
     total_differences = models.IntegerField(default=0)
-    total_difference_value = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_difference_value = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -245,14 +306,18 @@ class InventoryCount(models.Model):
 
 class InventoryCountItem(models.Model):
     """Ligne de comptage d'inventaire"""
-    inventory = models.ForeignKey(InventoryCount, on_delete=models.CASCADE, related_name='items')
+    inventory = models.ForeignKey(
+        InventoryCount, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
+    variant = models.ForeignKey(
+        ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
     theoretical_quantity = models.IntegerField(default=0)
     counted_quantity = models.IntegerField(default=0)
     difference = models.IntegerField(default=0)
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    difference_value = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    unit_price = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0)
+    difference_value = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0)
     is_counted = models.BooleanField(default=False)
     is_valid = models.BooleanField(default=True)
     notes = models.TextField(blank=True, null=True)
@@ -285,15 +350,20 @@ class StockAlert(models.Model):
         ('ignored', 'Ignorée'),
     )
 
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='stock_alerts')
-    variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='stock_alerts')
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='stock_alerts')
+    variant = models.ForeignKey(
+        ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.CASCADE, related_name='stock_alerts')
     alert_type = models.CharField(max_length=20, choices=ALERT_TYPES)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='active')
     current_quantity = models.IntegerField()
     threshold = models.IntegerField()
     message = models.TextField()
-    acknowledged_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='acknowledged_alerts')
+    acknowledged_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='acknowledged_alerts')
     acknowledged_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -307,15 +377,22 @@ class StockAlert(models.Model):
 
 class WarehouseStock(models.Model):
     """Stock d'un produit dans un entrepôt spécifique"""
-    product = models.ForeignKey('produits.Product', on_delete=models.CASCADE, related_name='warehouse_stocks')
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='product_stocks')
-    variant = models.ForeignKey('produits.ProductVariant', on_delete=models.SET_NULL, null=True, blank=True, related_name='warehouse_stocks')
-    quantity = models.IntegerField(default=0, validators=[MinValueValidator(0)])
-    location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='stocks')
-    minimum_stock = models.IntegerField(default=5, validators=[MinValueValidator(0)])
+    product = models.ForeignKey(
+        'produits.Product', on_delete=models.CASCADE, related_name='warehouse_stocks')
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.CASCADE, related_name='product_stocks')
+    variant = models.ForeignKey('produits.ProductVariant', on_delete=models.SET_NULL,
+                                null=True, blank=True, related_name='warehouse_stocks')
+    quantity = models.IntegerField(
+        default=0, validators=[MinValueValidator(0)])
+    location = models.ForeignKey(
+        Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='stocks')
+    minimum_stock = models.IntegerField(
+        default=5, validators=[MinValueValidator(0)])
     maximum_stock = models.IntegerField(null=True, blank=True)
     last_updated = models.DateTimeField(auto_now=True)
-    updated_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, related_name='updated_stocks')
+    updated_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, related_name='updated_stocks')
 
     class Meta:
         unique_together = ['product', 'warehouse', 'variant']
@@ -332,15 +409,20 @@ class WarehouseStock(models.Model):
 
 class Lot(models.Model):
     """Gestion des lots"""
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='lots')
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='lots')
     lot_number = models.CharField(max_length=100, unique=True)
-    serial_number = models.CharField(max_length=100, unique=True, null=True, blank=True)
+    serial_number = models.CharField(
+        max_length=100, unique=True, null=True, blank=True)
     manufacturing_date = models.DateField(null=True, blank=True)
     expiry_date = models.DateField(null=True, blank=True)
     best_before_date = models.DateField(null=True, blank=True)
-    quantity = models.IntegerField(default=0, validators=[MinValueValidator(0)])
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name='lots')
-    location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True)
+    quantity = models.IntegerField(
+        default=0, validators=[MinValueValidator(0)])
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.PROTECT, related_name='lots')
+    location = models.ForeignKey(
+        Location, on_delete=models.SET_NULL, null=True, blank=True)
 
     QUALITY_STATUS = (
         ('good', 'Bon'),
@@ -348,7 +430,8 @@ class Lot(models.Model):
         ('expired', 'Expiré'),
         ('quarantine', 'En quarantaine'),
     )
-    quality_status = models.CharField(max_length=20, choices=QUALITY_STATUS, default='good')
+    quality_status = models.CharField(
+        max_length=20, choices=QUALITY_STATUS, default='good')
     supplier = models.CharField(max_length=200, blank=True, null=True)
     purchase_order = models.CharField(max_length=100, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
@@ -356,7 +439,8 @@ class Lot(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        indexes = [models.Index(fields=['lot_number']), models.Index(fields=['serial_number']), models.Index(fields=['expiry_date'])]
+        indexes = [models.Index(fields=['lot_number']), models.Index(
+            fields=['serial_number']), models.Index(fields=['expiry_date'])]
         ordering = ['-created_at']
 
     def __str__(self):
@@ -374,8 +458,10 @@ class Lot(models.Model):
 
 class QualityControl(models.Model):
     """Contrôle qualité"""
-    lot = models.ForeignKey(Lot, on_delete=models.CASCADE, related_name='quality_controls')
-    inspector = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True)
+    lot = models.ForeignKey(Lot, on_delete=models.CASCADE,
+                            related_name='quality_controls')
+    inspector = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True)
     control_date = models.DateTimeField(auto_now_add=True)
 
     RESULT_CHOICES = (
@@ -383,7 +469,8 @@ class QualityControl(models.Model):
         ('failed', 'Non conforme'),
         ('pending', 'En attente'),
     )
-    result = models.CharField(max_length=20, choices=RESULT_CHOICES, default='pending')
+    result = models.CharField(
+        max_length=20, choices=RESULT_CHOICES, default='pending')
     notes = models.TextField(blank=True, null=True)
     certificate = models.FileField(upload_to='quality/', null=True, blank=True)
 
@@ -394,11 +481,11 @@ class QualityControl(models.Model):
 def get_default_warehouse(agence):
     """Retourne l'entrepôt par défaut d'une agence. Si aucun, en crée un automatiquement."""
     from .models import Warehouse
-    
+
     warehouse = agence.warehouses.filter(is_default=True).first()
     if not warehouse:
         warehouse = agence.warehouses.filter(is_active=True).first()
-    
+
     if not warehouse:
         warehouse = Warehouse.objects.create(
             code=f"WH_{agence.code if agence.code else agence.id}",
@@ -412,5 +499,5 @@ def get_default_warehouse(agence):
             is_active=True,
             is_default=True
         )
-    
+
     return warehouse
