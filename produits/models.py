@@ -153,7 +153,7 @@ def delete_product_files(sender, instance, **kwargs):
             os.remove(instance.main_image.path)
         except Exception as e:
             print(f"Erreur lors de la suppression de l'image principale: {e}")
-    
+
     # Supprimer les images de la galerie
     for image in instance.images.all():
         if image.image and os.path.isfile(image.image.path):
@@ -176,6 +176,8 @@ class ProductVariant(models.Model):
     def __str__(self):
         return f"{self.product.name} - {self.sku}"
 
+
+# products/models.py
 
 class ProductPricing(models.Model):
     """
@@ -217,11 +219,7 @@ class ProductPricing(models.Model):
 
     currency = models.CharField(max_length=10, default='XOF')
 
-    tax_rate = models.IntegerField(
-        default=20,
-        validators=[MinValueValidator(0), MaxValueValidator(100)],
-        help_text="Taux de TVA en %"
-    )
+    # ❌ SUPPRIMÉ : tax_rate
 
     valid_from = models.DateField(auto_now_add=True)
     valid_to = models.DateField(null=True, blank=True)

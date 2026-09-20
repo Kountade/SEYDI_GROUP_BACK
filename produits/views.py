@@ -657,6 +657,7 @@ class ProductVariantViewset(viewsets.ModelViewSet):
 class ProductPricingViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des prix par entrepôt
+    (SANS TVA - supprimée complètement)
     """
     serializer_class = ProductPricingSerializer
     permission_classes = [IsAuthenticated]
@@ -839,6 +840,16 @@ class ProductPricingViewSet(viewsets.ModelViewSet):
                     'error': 'Le prix de vente ne peut pas être inférieur au prix d\'achat'
                 }, status=400)
 
+            # Gestion du prix de gros (optionnel)
+            wholesale_price = request.data.get('wholesale_price')
+            if wholesale_price is not None and wholesale_price != '':
+                try:
+                    wholesale_price = float(wholesale_price)
+                except ValueError:
+                    return Response({'error': 'Le prix de gros doit être un nombre valide'}, status=400)
+            else:
+                wholesale_price = None
+
             # Désactiver les anciens prix
             ProductPricing.objects.filter(
                 product=product,
@@ -846,15 +857,15 @@ class ProductPricingViewSet(viewsets.ModelViewSet):
                 is_current=True
             ).update(is_current=False, valid_to=timezone.now().date())
 
-            # Créer le nouveau prix
+            # ✅ Créer le nouveau prix (SANS tax_rate)
             pricing = ProductPricing.objects.create(
                 product=product,
                 warehouse=warehouse,
                 purchase_price=purchase_price,
                 sale_price=sale_price,
-                wholesale_price=request.data.get('wholesale_price'),
+                wholesale_price=wholesale_price,
                 currency=request.data.get('currency', 'XOF'),
-                tax_rate=int(request.data.get('tax_rate', 20)),
+                # ❌ SUPPRIMÉ : tax_rate=int(request.data.get('tax_rate', 20)),
                 updated_by=request.user,
                 is_current=True,
                 valid_from=timezone.now().date()
