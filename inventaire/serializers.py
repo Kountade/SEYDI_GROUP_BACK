@@ -302,7 +302,8 @@ class InventoryCountDetailSerializer(serializers.ModelSerializer):
 
 
 class InventoryCountCreateSerializer(serializers.ModelSerializer):
-    items = InventoryCountItemSerializer(many=True)
+    items = InventoryCountItemSerializer(
+        many=True, required=False, default=list)
 
     class Meta:
         model = InventoryCount
@@ -314,7 +315,7 @@ class InventoryCountCreateSerializer(serializers.ModelSerializer):
         )
 
     def create(self, validated_data):
-        items_data = validated_data.pop('items')
+        items_data = validated_data.pop('items', [])
         inventory = InventoryCount.objects.create(**validated_data)
         for item_data in items_data:
             product = item_data['product']

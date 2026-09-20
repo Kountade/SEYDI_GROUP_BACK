@@ -6,8 +6,6 @@ from users.models import CustomUser, Agence
 from produits.models import Product, ProductVariant
 
 
-# inventaire/models.py
-
 class Warehouse(models.Model):
     """Entrepôt / Magasin"""
     WAREHOUSE_TYPES = (
@@ -53,10 +51,6 @@ class Warehouse(models.Model):
 
     class Meta:
         ordering = ['name']
-
-        # ✅ Contraintes :
-        # - code unique globalement
-        # - un seul entrepôt par défaut par agence
         constraints = [
             models.UniqueConstraint(
                 fields=['code'],
@@ -73,14 +67,11 @@ class Warehouse(models.Model):
         return f"{self.code} - {self.name} ({self.agence.nom})"
 
     def save(self, *args, **kwargs):
-        # ✅ Si cet entrepôt est défini comme par défaut,
-        # retirer le statut des autres entrepôts de la même agence
         if self.is_default:
             Warehouse.objects.filter(
                 agence=self.agence,
                 is_default=True
             ).exclude(pk=self.pk).update(is_default=False)
-
         super().save(*args, **kwargs)
 
 
@@ -130,7 +121,7 @@ class StockMovement(models.Model):
         ('manual', 'Manuel'),
     )
 
-    reference = models.CharField(max_length=100, unique=True)
+    reference = models.CharField(max_length=100, unique=True, blank=True)
     movement_type = models.CharField(max_length=20, choices=MOVEMENT_TYPES)
     reference_type = models.CharField(
         max_length=20, choices=REFERENCE_TYPES, default='manual')
@@ -199,7 +190,7 @@ class Transfer(models.Model):
         ('cancelled', 'Annulé'),
     )
 
-    reference = models.CharField(max_length=100, unique=True)
+    reference = models.CharField(max_length=100, unique=True, blank=True)
     from_agence = models.ForeignKey('users.Agence', on_delete=models.PROTECT,
                                     related_name='transfers_from', verbose_name="Agence source")
     to_agence = models.ForeignKey('users.Agence', on_delete=models.PROTECT,
@@ -268,6 +259,10 @@ class TransferItem(models.Model):
         return qty - received
 
 
+# ============================================================
+# INVENTORY COUNT — ✅ CORRIGÉ
+# ============================================================
+
 class InventoryCount(models.Model):
     """Comptage d'inventaire"""
     STATUS_CHOICES = (
@@ -278,7 +273,7 @@ class InventoryCount(models.Model):
         ('cancelled', 'Annulé'),
     )
 
-    reference = models.CharField(max_length=100, unique=True)
+    reference = models.CharField(max_length=100, unique=True, blank=True)
     warehouse = models.ForeignKey(
         Warehouse, on_delete=models.PROTECT, related_name='inventory_counts')
     count_date = models.DateField(auto_now_add=True)
@@ -299,9 +294,28 @@ class InventoryCount(models.Model):
 
     class Meta:
         ordering = ['-count_date']
+        indexes = [
+            models.Index(fields=['reference']),
+            models.Index(fields=['status']),
+            models.Index(fields=['warehouse', 'count_date']),
+        ]
 
     def __str__(self):
         return f"Inventaire {self.reference} - {self.warehouse.name}"
+
+    # ✅ Génération automatique de la référence
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            last = InventoryCount.objects.order_by('-id').first()
+            if last and last.reference:
+                try:
+                    last_num = int(last.reference.replace('INV', ''))
+                    self.reference = f"INV{str(last_num + 1).zfill(6)}"
+                except (ValueError, AttributeError):
+                    self.reference = f"INV{str(InventoryCount.objects.count() + 1).zfill(6)}"
+            else:
+                self.reference = "INV000001"
+        super().save(*args, **kwargs)
 
 
 class InventoryCountItem(models.Model):

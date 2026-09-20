@@ -5,7 +5,7 @@ from rest_framework import viewsets, generics, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Sum, Q, F
+from django.db.models import Sum, Q, F, OuterRef, Subquery
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from django.db import transaction
@@ -17,9 +17,45 @@ from users.permissions import (
     HasAgenceAccess,
     IsPDG,
     IsChefAgence,
-    IsPDGOrChefAgence,   # ✅ Permission combinée corrigée
+    IsPDGOrChefAgence,
 )
-from produits.models import Product, ProductVariant
+from produits.models import Product, ProductVariant, ProductPricing
+
+
+# ============================================================
+# UTILITAIRE : Recalcul des totaux d'un inventaire
+# ============================================================
+
+def recalc_inventory_totals(inventory):
+    """Recalcule et sauvegarde les totaux d'un inventaire."""
+    items = inventory.items.all()
+    inventory.total_items = items.count()
+    inventory.total_differences = items.exclude(difference=0).count()
+    inventory.total_difference_value = sum(
+        (item.difference_value or 0) for item in items
+    )
+    inventory.save(update_fields=[
+        'total_items', 'total_differences',
+        'total_difference_value', 'updated_at'
+    ])
+    return inventory
+
+
+def get_product_purchase_price(product, warehouse):
+    """
+    ✅ Récupère le prix d'achat d'un produit pour un entrepôt donné.
+    Le prix est stocké dans ProductPricing (par entrepôt), pas dans Product.
+    """
+    if not product or not warehouse:
+        return 0
+    pricing = ProductPricing.objects.filter(
+        product=product,
+        warehouse=warehouse,
+        is_current=True,
+    ).first()
+    if pricing and pricing.purchase_price is not None:
+        return pricing.purchase_price
+    return 0
 
 
 # ============================================================
@@ -51,66 +87,52 @@ class TransferViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
-        """Soumettre un transfert pour approbation"""
         try:
             transfer = self.get_object()
-
             if transfer.status != 'draft':
                 return Response(
                     {'error': 'Seul un transfert en brouillon peut être soumis'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             if not request.user.peut_acceder_agence(transfer.to_agence.id):
                 return Response(
                     {'error': 'Action non autorisée'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-
             if (transfer.from_agence.type_agence != 'principale'
                     or transfer.to_agence.type_agence != 'secondaire'):
                 return Response(
-                    {'error': "Transfert non autorisé: l'agence source doit être "
-                              "principale et la destination secondaire"},
+                    {'error': "Transfert non autorisé"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             transfer.status = 'pending_approval'
             transfer.save()
-
             return Response(TransferDetailSerializer(transfer).data)
-
         except Exception as e:
             return Response(
-                {'error': f'Erreur lors de la soumission: {str(e)}'},
+                {'error': f'Erreur: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def approve(self, request, pk=None):
-        """Approuver un transfert et diminuer le stock dans l'entrepôt source"""
         try:
             transfer = self.get_object()
-
             if transfer.status != 'pending_approval':
                 return Response(
-                    {'error': f"La demande doit être en attente d'approbation. "
-                     f"Statut actuel: {transfer.status}"},
+                    {'error': f"Statut actuel: {transfer.status}"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             if not request.user.peut_acceder_agence(transfer.from_agence.id):
                 return Response(
-                    {'error': "Seul un responsable de l'agence principale peut approuver"},
+                    {'error': "Action non autorisée"},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-
             from_warehouse = get_default_warehouse(transfer.from_agence)
             if not from_warehouse:
                 return Response(
-                    {'error': f"Entrepôt source non configuré pour l'agence "
-                     f"{transfer.from_agence.nom}"},
+                    {'error': f"Entrepôt source non configuré"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -123,7 +145,6 @@ class TransferViewSet(viewsets.ModelViewSet):
                     warehouse=from_warehouse,
                     variant=item.variant,
                 ).first()
-
                 if not from_stock:
                     items_sans_stock.append({
                         'product': item.product.name,
@@ -131,32 +152,24 @@ class TransferViewSet(viewsets.ModelViewSet):
                         'demande': item.quantity,
                     })
                     continue
-
                 if from_stock.quantity < item.quantity:
                     stock_insuffisant.append({
                         'product': item.product.name,
                         'reference': item.product.reference,
                         'disponible': from_stock.quantity,
                         'demande': item.quantity,
-                        'manquant': item.quantity - from_stock.quantity,
                     })
 
             if items_sans_stock:
                 return Response(
-                    {
-                        'error': "Certains produits n'ont pas de stock configuré "
-                                 "dans l'entrepôt source",
-                        'details': items_sans_stock,
-                    },
+                    {'error': "Certains produits n'ont pas de stock",
+                     'details': items_sans_stock},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             if stock_insuffisant:
                 return Response(
-                    {
-                        'error': "Stock insuffisant dans l'entrepôt source",
-                        'details': stock_insuffisant,
-                    },
+                    {'error': "Stock insuffisant",
+                     'details': stock_insuffisant},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -171,7 +184,7 @@ class TransferViewSet(viewsets.ModelViewSet):
                     quantity=item.quantity,
                     from_warehouse=from_warehouse,
                     unit_price=item.unit_price,
-                    notes=f"Transfert sortant {transfer.reference} vers {transfer.to_agence.nom}",
+                    notes=f"Transfert sortant {transfer.reference}",
                     created_by=request.user,
                 )
                 items_traites.append({
@@ -185,7 +198,6 @@ class TransferViewSet(viewsets.ModelViewSet):
             transfer.approved_at = timezone.now()
             transfer.save()
 
-            # Mettre à jour le stock global
             for item in transfer.items.all():
                 total_stock = WarehouseStock.objects.filter(
                     product=item.product
@@ -197,40 +209,33 @@ class TransferViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': 'Transfert approuvé avec succès',
+                'message': 'Transfert approuvé',
                 'transfer': TransferDetailSerializer(transfer).data,
                 'items_processed': items_traites,
             })
-
         except Exception as e:
             return Response(
-                {'error': f"Erreur lors de l'approbation: {str(e)}"},
+                {'error': f"Erreur: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def start_transit(self, request, pk=None):
-        """Démarrer le transit du transfert"""
         try:
             transfer = self.get_object()
-
             if transfer.status != 'approved':
                 return Response(
-                    {'error': f"Le transfert doit être approuvé. "
-                     f"Statut actuel: {transfer.status}"},
+                    {'error': f"Statut actuel: {transfer.status}"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             transfer.status = 'in_transit'
             transfer.save()
-
             return Response({
                 'success': True,
                 'message': 'Transfert en transit',
                 'transfer': TransferDetailSerializer(transfer).data,
             })
-
         except Exception as e:
             return Response(
                 {'error': f'Erreur: {str(e)}'},
@@ -240,17 +245,13 @@ class TransferViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def receive(self, request, pk=None):
-        """Réceptionner partiellement ou totalement un transfert"""
         try:
             transfer = self.get_object()
-
             if transfer.status not in ['in_transit', 'partial']:
                 return Response(
-                    {'error': f"Le transfert doit être en transit. "
-                     f"Statut actuel: {transfer.status}"},
+                    {'error': f"Statut actuel: {transfer.status}"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             if not request.user.peut_acceder_agence(transfer.to_agence.id):
                 return Response(
                     {'error': 'Action non autorisée'},
@@ -267,8 +268,7 @@ class TransferViewSet(viewsets.ModelViewSet):
             to_warehouse = get_default_warehouse(transfer.to_agence)
             if not to_warehouse:
                 return Response(
-                    {'error': f"Entrepôt destination non configuré pour "
-                     f"{transfer.to_agence.nom}"},
+                    {'error': f"Entrepôt destination non configuré"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -278,7 +278,6 @@ class TransferViewSet(viewsets.ModelViewSet):
             for item_data in received_items:
                 item_id = item_data.get('item_id')
                 quantity_received = item_data.get('quantity', 0)
-
                 if quantity_received <= 0:
                     continue
 
@@ -288,20 +287,14 @@ class TransferViewSet(viewsets.ModelViewSet):
                     )
                 except TransferItem.DoesNotExist:
                     return Response(
-                        {'error': f'Article avec ID {item_id} non trouvé dans ce transfert'},
+                        {'error': f'Article {item_id} non trouvé'},
                         status=status.HTTP_404_NOT_FOUND,
                     )
 
                 remaining = transfer_item.quantity - transfer_item.quantity_received
                 if quantity_received > remaining:
                     return Response(
-                        {
-                            'error': f"Quantité reçue pour {transfer_item.product.name} "
-                            f"dépasse la quantité restante",
-                            'product': transfer_item.product.name,
-                            'quantite_recue': quantity_received,
-                            'restant': remaining,
-                        },
+                        {'error': f"Quantité dépasse le restant pour {transfer_item.product.name}"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
@@ -324,8 +317,6 @@ class TransferViewSet(viewsets.ModelViewSet):
                 items_recus.append({
                     'product': transfer_item.product.name,
                     'quantity_received': quantity_received,
-                    'total_received': transfer_item.quantity_received,
-                    'total_ordered': transfer_item.quantity,
                     'movement_reference': movement.reference,
                 })
 
@@ -341,8 +332,8 @@ class TransferViewSet(viewsets.ModelViewSet):
             for item_data in received_items:
                 item_id = item_data.get('item_id')
                 if item_id:
-                    transfer_item = TransferItem.objects.get(id=item_id)
-                    produits_modifies.add(transfer_item.product.id)
+                    ti = TransferItem.objects.get(id=item_id)
+                    produits_modifies.add(ti.product.id)
 
             for product_id in produits_modifies:
                 product = Product.objects.get(id=product_id)
@@ -356,54 +347,45 @@ class TransferViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': True,
-                'message': ('Transfert réceptionné avec succès'
-                            if all_completed else 'Réception partielle effectuée'),
+                'message': 'Transfert réceptionné',
                 'all_completed': all_completed,
                 'transfer': TransferDetailSerializer(transfer).data,
                 'received_items': items_recus,
             })
-
         except Exception as e:
             return Response(
-                {'error': f'Erreur lors de la réception: {str(e)}'},
+                {'error': f'Erreur: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        """Rejeter un transfert"""
         try:
             transfer = self.get_object()
-
             if transfer.status != 'pending_approval':
                 return Response(
-                    {'error': "La demande doit être en attente d'approbation pour être rejetée"},
+                    {'error': "La demande doit être en attente d'approbation"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             if not request.user.peut_acceder_agence(transfer.from_agence.id):
                 return Response(
                     {'error': 'Action non autorisée'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-
             reason = request.data.get('reason', '')
             if not reason:
                 return Response(
-                    {'error': 'Une raison est requise pour le rejet'},
+                    {'error': 'Une raison est requise'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             transfer.status = 'rejected'
             transfer.rejected_reason = reason
             transfer.save()
-
             return Response({
                 'success': True,
                 'message': 'Transfert rejeté',
                 'transfer': TransferDetailSerializer(transfer).data,
             })
-
         except Exception as e:
             return Response(
                 {'error': f'Erreur: {str(e)}'},
@@ -413,26 +395,20 @@ class TransferViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def cancel(self, request, pk=None):
-        """Annuler un transfert"""
         try:
             transfer = self.get_object()
-
             if transfer.status not in ['draft', 'pending_approval']:
                 return Response(
-                    {'error': 'Ce transfert ne peut pas être annulé car il est '
-                              'déjà en cours ou terminé'},
+                    {'error': 'Ce transfert ne peut pas être annulé'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             transfer.status = 'cancelled'
             transfer.save()
-
             return Response({
                 'success': True,
-                'message': 'Transfert annulé avec succès',
+                'message': 'Transfert annulé',
                 'transfer': TransferDetailSerializer(transfer).data,
             })
-
         except Exception as e:
             return Response(
                 {'error': f'Erreur: {str(e)}'},
@@ -441,10 +417,8 @@ class TransferViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
-        """Obtenir le statut détaillé d'un transfert"""
         try:
             transfer = self.get_object()
-
             items_status = []
             for item in transfer.items.all():
                 items_status.append({
@@ -458,36 +432,16 @@ class TransferViewSet(viewsets.ModelViewSet):
                         (item.quantity_received / item.quantity * 100), 2
                     ) if item.quantity > 0 else 0,
                     'unit_price': str(item.unit_price),
-                    'total_value': str(item.quantity * item.unit_price),
-                    'received_value': str(item.quantity_received * item.unit_price),
                     'notes': item.notes,
                 })
-
             return Response({
                 'transfer_id': transfer.id,
                 'reference': transfer.reference,
-                'from_agence': transfer.from_agence.nom,
-                'to_agence': transfer.to_agence.nom,
                 'status': transfer.status,
                 'status_display': transfer.get_status_display(),
-                'transfer_date': transfer.transfer_date,
-                'expected_date': transfer.expected_date,
-                'completed_date': transfer.completed_date,
-                'waybill': transfer.waybill,
-                'notes': transfer.notes,
-                'created_by': transfer.created_by.email if transfer.created_by else None,
-                'created_at': transfer.created_at,
-                'approved_by': transfer.approved_by.email if transfer.approved_by else None,
-                'approved_at': transfer.approved_at,
-                'rejected_reason': transfer.rejected_reason,
                 'items': items_status,
                 'total_items': len(items_status),
-                'overall_completion': round(
-                    sum(i['completion_percentage']
-                        for i in items_status) / len(items_status), 2
-                ) if items_status else 0,
             })
-
         except Exception as e:
             return Response(
                 {'error': f'Erreur: {str(e)}'},
@@ -496,27 +450,21 @@ class TransferViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def update_waybill(self, request, pk=None):
-        """Mettre à jour le numéro de bon de livraison"""
         try:
             transfer = self.get_object()
             waybill = request.data.get('waybill')
-
             if not waybill:
                 return Response(
                     {'error': 'Le numéro de bon de livraison est requis'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             transfer.waybill = waybill
             transfer.save()
-
             return Response({
                 'success': True,
-                'message': 'Bon de livraison mis à jour',
                 'waybill': transfer.waybill,
                 'transfer': TransferDetailSerializer(transfer).data,
             })
-
         except Exception as e:
             return Response(
                 {'error': f'Erreur: {str(e)}'},
@@ -525,13 +473,10 @@ class TransferViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def printable(self, request, pk=None):
-        """Générer les données pour impression du bon de transfert"""
         try:
             transfer = self.get_object()
-
             items_data = []
             total_value = 0
-
             for item in transfer.items.all():
                 item_total = item.quantity * item.unit_price
                 total_value += item_total
@@ -545,35 +490,22 @@ class TransferViewSet(viewsets.ModelViewSet):
                     'total': str(item_total),
                     'notes': item.notes,
                 })
-
             return Response({
                 'transfer': {
                     'reference': transfer.reference,
                     'from_agence': transfer.from_agence.nom,
                     'to_agence': transfer.to_agence.nom,
-                    'from_agence_address': transfer.from_agence.adresse,
-                    'to_agence_address': transfer.to_agence.adresse,
-                    'transfer_date': transfer.transfer_date,
-                    'expected_date': transfer.expected_date,
-                    'completed_date': transfer.completed_date,
                     'status': transfer.get_status_display(),
                     'waybill': transfer.waybill,
                     'notes': transfer.notes,
-                    'created_by': transfer.created_by.get_full_name() if transfer.created_by else None,
-                    'created_at': transfer.created_at,
-                    'approved_by': transfer.approved_by.get_full_name() if transfer.approved_by else None,
-                    'approved_at': transfer.approved_at,
                 },
                 'items': items_data,
                 'summary': {
                     'total_items': len(items_data),
                     'total_quantity': sum(i['quantity'] for i in items_data),
-                    'total_received': sum(i['quantity_received'] for i in items_data),
-                    'total_remaining': sum(i['remaining'] for i in items_data),
                     'total_value': str(total_value),
                 },
             })
-
         except Exception as e:
             return Response(
                 {'error': f'Erreur: {str(e)}'},
@@ -628,10 +560,6 @@ class LocationViewSet(viewsets.ModelViewSet):
 # STOCK MOVEMENT VIEWSET
 # ============================================================
 
-# ============================================================
-# STOCK MOVEMENT VIEWSET ✅ CORRIGÉ
-# ============================================================
-
 class StockMovementViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasAgenceAccess]
 
@@ -641,7 +569,6 @@ class StockMovementViewSet(viewsets.ModelViewSet):
             'product', 'variant', 'from_warehouse', 'to_warehouse', 'created_by'
         ).all()
 
-        # PDG / DRH / superuser : tout voir
         if user.is_superuser or user.is_staff:
             pass
         elif user.est_pdg() or user.est_drh():
@@ -654,10 +581,8 @@ class StockMovementViewSet(viewsets.ModelViewSet):
                     Q(to_warehouse__agence_id__in=agences_ids)
                 )
             else:
-                # Pas d'agence → aucun mouvement
                 qs = qs.none()
 
-        # ===== FILTRES =====
         movement_type = self.request.query_params.get('movement_type')
         if movement_type:
             qs = qs.filter(movement_type=movement_type)
@@ -710,10 +635,8 @@ class StockMovementViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def export(self, request):
-        """Export CSV des mouvements"""
         import csv
         from django.http import HttpResponse
-
         qs = self.get_queryset()
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = (
@@ -764,10 +687,17 @@ class StockMovementByWarehouseView(generics.ListAPIView):
 
 
 # ============================================================
-# INVENTORY COUNT VIEWSET
+# INVENTORY COUNT VIEWSET ✅ COMPLET ET CORRIGÉ
 # ============================================================
 
 class InventoryCountViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des inventaires.
+
+    Workflow :
+        draft → in_progress → completed → validated
+                          ↘ cancelled ↙
+    """
     permission_classes = [IsAuthenticated, HasAgenceAccess]
 
     def get_queryset(self):
@@ -787,6 +717,322 @@ class InventoryCountViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(counted_by=self.request.user)
 
+    # ============================================================
+    # ✅ PUT/PATCH : interception des changements de statut
+    # ============================================================
+    def update(self, request, *args, **kwargs):
+        """
+        Intercepte les changements de statut :
+        - status='in_progress' → appelle start() (génère les items)
+        - status='completed'   → appelle complete()
+        - status='validated'   → appelle validate()
+        - status='cancelled'   → appelle cancel()
+        """
+        instance = self.get_object()
+        new_status = request.data.get('status')
+
+        if new_status and new_status != instance.status:
+            if new_status == 'in_progress':
+                return self.start(request, pk=kwargs.get('pk'))
+            elif new_status == 'completed':
+                return self.complete(request, pk=kwargs.get('pk'))
+            elif new_status == 'validated':
+                return self.validate(request, pk=kwargs.get('pk'))
+            elif new_status == 'cancelled':
+                return self.cancel(request, pk=kwargs.get('pk'))
+
+        return super().update(request, *args, **kwargs)
+
+    # ============================================================
+    # ✅ ACTION : start (draft → in_progress + génération des items)
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def start(self, request, pk=None):
+        """
+        Démarre l'inventaire :
+        - Vérifie le statut (draft)
+        - Génère les InventoryCountItem depuis WarehouseStock
+        - Récupère les prix depuis ProductPricing (par entrepôt)
+        - Passe le statut à 'in_progress'
+        """
+        inventory = self.get_object()
+
+        if inventory.status != 'draft':
+            return Response(
+                {'error': f"Seul un inventaire en brouillon peut être démarré. "
+                          f"Statut actuel: {inventory.status}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if inventory.items.exists():
+            return Response(
+                {'error': "Les articles ont déjà été générés",
+                 'items_count': inventory.items.count()},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Récupérer le stock de l'entrepôt
+        stocks = WarehouseStock.objects.filter(
+            warehouse=inventory.warehouse
+        ).select_related('product', 'variant')
+
+        if not stocks.exists():
+            return Response(
+                {'error': f"Aucun stock à inventorier dans l'entrepôt "
+                          f"'{inventory.warehouse.name}'. "
+                          f"Ajoutez d'abord du stock via /stocks/ajouter."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ✅ Créer les items en récupérant le prix depuis ProductPricing
+        items_to_create = []
+        for stock in stocks:
+            # ✅ Récupérer le prix d'achat depuis ProductPricing (par entrepôt)
+            pricing = ProductPricing.objects.filter(
+                product=stock.product,
+                warehouse=inventory.warehouse,
+                is_current=True,
+            ).first()
+
+            unit_price = pricing.purchase_price if pricing else 0
+
+            items_to_create.append(InventoryCountItem(
+                inventory=inventory,
+                product=stock.product,
+                variant=stock.variant,
+                theoretical_quantity=stock.quantity,
+                counted_quantity=0,
+                unit_price=unit_price,
+                is_counted=False,
+            ))
+
+        InventoryCountItem.objects.bulk_create(items_to_create)
+
+        inventory.status = 'in_progress'
+        inventory.save()
+        recalc_inventory_totals(inventory)
+
+        return Response({
+            'success': True,
+            'message': f'{len(items_to_create)} article(s) généré(s)',
+            'items_count': len(items_to_create),
+            'inventory': InventoryCountDetailSerializer(
+                inventory, context={'request': request}
+            ).data,
+        })
+
+    # ============================================================
+    # ✅ ACTION : complete (in_progress → completed)
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def complete(self, request, pk=None):
+        """Termine l'inventaire : recalcule les totaux, passe à 'completed'."""
+        inventory = self.get_object()
+
+        if inventory.status != 'in_progress':
+            return Response(
+                {'error': f"Seul un inventaire en cours peut être terminé. "
+                          f"Statut actuel: {inventory.status}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        recalc_inventory_totals(inventory)
+        inventory.status = 'completed'
+        inventory.save()
+
+        return Response({
+            'success': True,
+            'message': 'Inventaire terminé',
+            'inventory': InventoryCountDetailSerializer(
+                inventory, context={'request': request}
+            ).data,
+        })
+
+    # ============================================================
+    # ✅ ACTION : validate (completed → validated + ajustements)
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def validate(self, request, pk=None):
+        """Valide définitivement l'inventaire + crée les ajustements."""
+        inventory = self.get_object()
+
+        if inventory.status != 'completed':
+            return Response(
+                {'error': f"Seul un inventaire terminé peut être validé. "
+                          f"Statut actuel: {inventory.status}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        create_movements = request.data.get('create_movements', True)
+        notes = request.data.get('notes', '')
+
+        movements_created = []
+        products_updated = set()
+
+        if create_movements:
+            for item in inventory.items.exclude(difference=0):
+                movement = StockMovement.objects.create(
+                    movement_type='adjustment',
+                    reference_type='inventory',
+                    reference_id=inventory.id,
+                    product=item.product,
+                    variant=item.variant,
+                    quantity=abs(item.difference),
+                    to_warehouse=inventory.warehouse if item.difference > 0 else None,
+                    from_warehouse=inventory.warehouse if item.difference < 0 else None,
+                    unit_price=item.unit_price,
+                    notes=f"Ajustement inventaire {inventory.reference} "
+                          f"(théorique: {item.theoretical_quantity}, "
+                          f"compté: {item.counted_quantity})",
+                    created_by=request.user,
+                )
+                movements_created.append(movement.reference)
+                products_updated.add(item.product_id)
+
+        for product_id in products_updated:
+            product = Product.objects.get(id=product_id)
+            total_stock = WarehouseStock.objects.filter(
+                product=product
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+            if product.stock_quantity != total_stock:
+                product.stock_quantity = total_stock
+                product.save(update_fields=['stock_quantity', 'updated_at'])
+
+        inventory.status = 'validated'
+        inventory.validated_by = request.user
+        if notes:
+            inventory.notes = (inventory.notes or '') + f"\n[Validation] {notes}"
+        inventory.save()
+
+        return Response({
+            'success': True,
+            'message': f'Inventaire validé. {len(movements_created)} ajustement(s) créé(s).',
+            'movements_created': movements_created,
+            'products_updated': len(products_updated),
+            'inventory': InventoryCountDetailSerializer(
+                inventory, context={'request': request}
+            ).data,
+        })
+
+    # ============================================================
+    # ✅ ACTION : cancel
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Annule un inventaire."""
+        inventory = self.get_object()
+
+        if inventory.status == 'validated':
+            return Response(
+                {'error': "Un inventaire validé ne peut plus être annulé"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if inventory.status == 'cancelled':
+            return Response(
+                {'error': "Cet inventaire est déjà annulé"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        inventory.status = 'cancelled'
+        inventory.save()
+
+        return Response({
+            'success': True,
+            'message': 'Inventaire annulé',
+            'inventory': InventoryCountDetailSerializer(
+                inventory, context={'request': request}
+            ).data,
+        })
+
+    # ============================================================
+    # ✅ ACTION : update_item (PATCH /inventory-counts/{id}/items/{item_id}/)
+    # ============================================================
+    @action(
+        detail=True,
+        methods=['patch'],
+        url_path=r'items/(?P<item_id>[^/.]+)',
+    )
+    @transaction.atomic
+    def update_item(self, request, pk=None, item_id=None):
+        """Met à jour un item de l'inventaire (saisie du comptage)."""
+        inventory = self.get_object()
+
+        if inventory.status not in ['in_progress', 'draft']:
+            return Response(
+                {'error': f"Impossible de modifier les items d'un inventaire "
+                          f"en statut '{inventory.status}'"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            item = inventory.items.get(id=item_id)
+        except InventoryCountItem.DoesNotExist:
+            return Response(
+                {'error': 'Article non trouvé dans cet inventaire'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        counted = request.data.get('counted_quantity')
+        if counted is None:
+            return Response(
+                {'error': 'counted_quantity est requis'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            counted = int(counted)
+            if counted < 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'counted_quantity doit être un entier positif ou zéro'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        item.counted_quantity = counted
+        item.is_counted = request.data.get('is_counted', True)
+        item.save()
+
+        recalc_inventory_totals(inventory)
+
+        return Response({
+            'success': True,
+            'item': InventoryCountItemSerializer(item).data,
+            'inventory': {
+                'total_items': inventory.total_items,
+                'total_differences': inventory.total_differences,
+                'total_difference_value': str(inventory.total_difference_value),
+            },
+        })
+
+    # ============================================================
+    # ✅ ACTION : list_items (GET /inventory-counts/{id}/items/)
+    # ============================================================
+    @action(detail=True, methods=['get'], url_path='items')
+    def list_items(self, request, pk=None):
+        """Liste tous les items d'un inventaire."""
+        inventory = self.get_object()
+        items = inventory.items.all().select_related('product', 'variant')
+        serializer = InventoryCountItemSerializer(items, many=True)
+        return Response(serializer.data)
+
+    # ============================================================
+    # ✅ ACTION : generate_items (alias de start)
+    # ============================================================
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def generate_items(self, request, pk=None):
+        """Alias de start()."""
+        return self.start(request, pk)
+
+
+# ============================================================
+# INVENTORY COUNT VALIDATE VIEW (URL historique)
+# ============================================================
 
 class InventoryCountValidateView(generics.UpdateAPIView):
     queryset = InventoryCount.objects.all()
@@ -794,18 +1040,23 @@ class InventoryCountValidateView(generics.UpdateAPIView):
 
     def update(self, request, *args, **kwargs):
         inventory = self.get_object()
+
+        if inventory.status != 'completed':
+            return Response(
+                {'error': "L'inventaire doit être terminé pour être validé"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         serializer = InventoryCountValidateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        if inventory.status != 'completed':
-            return Response({'error': "L'inventaire doit être terminé"}, status=400)
+        create_movements = serializer.validated_data.get('create_movements', True)
+        movements_created = []
+        products_updated = set()
 
-        inventory.status = 'validated'
-        inventory.validated_by = request.user
-
-        if serializer.validated_data.get('create_movements'):
-            for item in inventory.items.filter(difference__gt=0):
-                StockMovement.objects.create(
+        if create_movements:
+            for item in inventory.items.exclude(difference=0):
+                movement = StockMovement.objects.create(
                     movement_type='adjustment',
                     reference_type='inventory',
                     reference_id=inventory.id,
@@ -818,37 +1069,86 @@ class InventoryCountValidateView(generics.UpdateAPIView):
                     notes=f"Ajustement inventaire {inventory.reference}",
                     created_by=request.user,
                 )
+                movements_created.append(movement.reference)
+                products_updated.add(item.product_id)
 
+        for product_id in products_updated:
+            product = Product.objects.get(id=product_id)
+            total_stock = WarehouseStock.objects.filter(
+                product=product
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+            if product.stock_quantity != total_stock:
+                product.stock_quantity = total_stock
+                product.save(update_fields=['stock_quantity', 'updated_at'])
+
+        inventory.status = 'validated'
+        inventory.validated_by = request.user
         inventory.save()
-        return Response(InventoryCountDetailSerializer(inventory).data)
 
+        return Response({
+            'success': True,
+            'message': f'Inventaire validé. {len(movements_created)} ajustement(s).',
+            'movements_created': movements_created,
+            'inventory': InventoryCountDetailSerializer(inventory).data,
+        })
+
+
+# ============================================================
+# INVENTORY COUNT GENERATE VIEW ✅ CORRIGÉE
+# ============================================================
 
 class InventoryCountGenerateView(generics.CreateAPIView):
+    """Crée un inventaire ET génère immédiatement ses items."""
     serializer_class = InventoryCountCreateSerializer
     permission_classes = [IsAuthenticated, HasAgenceAccess]
 
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         warehouse_id = request.data.get('warehouse')
+        if not warehouse_id:
+            return Response(
+                {'error': 'warehouse est requis'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         warehouse = get_object_or_404(Warehouse, id=warehouse_id)
-        products = Product.objects.filter(stock_quantity__gt=0)
 
         inventory = InventoryCount.objects.create(
             warehouse=warehouse,
             scheduled_date=request.data.get('scheduled_date'),
             notes=request.data.get('notes'),
             counted_by=request.user,
+            status='in_progress',
         )
 
-        for product in products:
-            InventoryCountItem.objects.create(
-                inventory=inventory,
-                product=product,
-                theoretical_quantity=product.stock_quantity,
-                unit_price=product.purchase_price,
-            )
+        stocks = WarehouseStock.objects.filter(
+            warehouse=warehouse
+        ).select_related('product', 'variant')
 
-        inventory.total_items = inventory.items.count()
-        inventory.save()
+        items_to_create = []
+        for stock in stocks:
+            # ✅ Récupérer le prix depuis ProductPricing
+            pricing = ProductPricing.objects.filter(
+                product=stock.product,
+                warehouse=warehouse,
+                is_current=True,
+            ).first()
+            unit_price = pricing.purchase_price if pricing else 0
+
+            items_to_create.append(InventoryCountItem(
+                inventory=inventory,
+                product=stock.product,
+                variant=stock.variant,
+                theoretical_quantity=stock.quantity,
+                counted_quantity=0,
+                unit_price=unit_price,
+                is_counted=False,
+            ))
+
+        if items_to_create:
+            InventoryCountItem.objects.bulk_create(items_to_create)
+
+        recalc_inventory_totals(inventory)
 
         return Response(
             InventoryCountDetailSerializer(inventory).data,
@@ -920,7 +1220,6 @@ class LotViewSet(viewsets.ModelViewSet):
             return LotListSerializer
         if self.action == 'retrieve':
             return LotDetailSerializer
-        # ✅ create / update / partial_update utilisent le serializer dédié
         return LotCreateSerializer
 
 
@@ -957,11 +1256,7 @@ class QualityControlViewSet(viewsets.ModelViewSet):
 
 
 # ============================================================
-# WAREHOUSE STOCK VIEWSET ✅ CORRIGÉ
-# ============================================================
-
-# ============================================================
-# WAREHOUSE STOCK VIEWSET ✅ CORRIGÉ (TRACABILITÉ AJOUT MANUEL)
+# WAREHOUSE STOCK VIEWSET
 # ============================================================
 
 class WarehouseStockViewSet(viewsets.ModelViewSet):
@@ -984,9 +1279,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
         warehouses = Warehouse.objects.filter(agence_id__in=agences_ids)
         return WarehouseStock.objects.filter(warehouse__in=warehouses)
 
-    # --------------------------------------------------------
-    # GET by_warehouse
-    # --------------------------------------------------------
     @action(detail=False, methods=['get'])
     def by_warehouse(self, request):
         warehouse_id = request.query_params.get('warehouse_id')
@@ -996,9 +1288,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(stocks, many=True)
         return Response(serializer.data)
 
-    # --------------------------------------------------------
-    # GET by_product
-    # --------------------------------------------------------
     @action(detail=False, methods=['get'])
     def by_product(self, request):
         product_id = request.query_params.get('product_id')
@@ -1008,9 +1297,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(stocks, many=True)
         return Response(serializer.data)
 
-    # --------------------------------------------------------
-    # GET low_stock
-    # --------------------------------------------------------
     @action(detail=False, methods=['get'])
     def low_stock(self, request):
         warehouse_id = request.query_params.get('warehouse_id')
@@ -1021,16 +1307,10 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(low_stock_items, many=True)
         return Response(serializer.data)
 
-    # --------------------------------------------------------
-    # ✅ POST add_stock — TRACABILITÉ GARANTIE
-    # --------------------------------------------------------
     @action(detail=False, methods=['post'])
     @transaction.atomic
     def add_stock(self, request):
-        """
-        Ajoute du stock à un produit dans un entrepôt.
-        ✅ Crée TOUJOURS un StockMovement pour la traçabilité.
-        """
+        """Ajoute du stock à un produit dans un entrepôt avec traçabilité."""
         product_id = request.data.get('product_id')
         warehouse_id = request.data.get('warehouse_id')
         quantity = request.data.get('quantity')
@@ -1038,7 +1318,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
         notes = request.data.get('notes', 'Ajout manuel de stock')
         unit_price = request.data.get('unit_price', 0) or 0
 
-        # --- Validation
         if not product_id or not warehouse_id:
             return Response(
                 {'error': 'product_id et warehouse_id sont requis'},
@@ -1058,47 +1337,37 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # --- Récupération produit
         try:
             product = Product.objects.get(id=product_id)
         except Product.DoesNotExist:
             return Response({'error': 'Produit non trouvé'}, status=404)
 
-        # --- Récupération entrepôt
         try:
             warehouse = Warehouse.objects.get(id=warehouse_id)
         except Warehouse.DoesNotExist:
             return Response({'error': 'Entrepôt non trouvé'}, status=404)
 
-        # --- Vérification accès
         if not request.user.est_pdg() and not request.user.peut_acceder_agence(warehouse.agence.id):
             return Response(
                 {'error': 'Accès non autorisé à cet entrepôt'},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # --- Variante
         variant = None
         if variant_id:
             try:
-                variant = ProductVariant.objects.get(
-                    id=variant_id, product=product)
+                variant = ProductVariant.objects.get(id=variant_id, product=product)
             except ProductVariant.DoesNotExist:
                 return Response(
                     {'error': 'Variante non trouvée pour ce produit'},
                     status=404,
                 )
 
-        # --- Récupérer l'état AVANT pour le message de retour
         existing_stock = WarehouseStock.objects.filter(
             product=product, warehouse=warehouse, variant=variant
         ).first()
         old_quantity = existing_stock.quantity if existing_stock else 0
 
-        # ============================================================
-        # ✅ ÉTAPE 1 : CRÉER LE MOUVEMENT (traçabilité)
-        # ⚠️ unit_price = 0 si non fourni — on ne touche pas au prix produit
-        # ============================================================
         try:
             movement = StockMovement.objects.create(
                 movement_type='in',
@@ -1112,27 +1381,18 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                 created_by=request.user,
             )
             movement_ref = movement.reference
-            print(f"✅ Mouvement créé: {movement_ref} - {quantity} unités de "
-                  f"{product.name} vers {warehouse.name}")
         except Exception as e:
             import traceback
             traceback.print_exc()
-            print(f"❌ Erreur création mouvement : {e}")
             return Response(
                 {'error': f'Erreur lors de la création du mouvement: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # ============================================================
-        # ✅ ÉTAPE 2 : Récupérer le stock APRÈS (mis à jour par le signal)
-        # ============================================================
         warehouse_stock = WarehouseStock.objects.get(
             product=product, warehouse=warehouse, variant=variant
         )
 
-        # ============================================================
-        # ✅ ÉTAPE 3 : Mise à jour du stock global produit
-        # ============================================================
         total_stock = WarehouseStock.objects.filter(product=product).aggregate(
             total=Sum('quantity')
         )['total'] or 0
@@ -1156,9 +1416,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK if existing_stock else status.HTTP_201_CREATED,
         )
 
-    # --------------------------------------------------------
-    # POST adjust_stock — avec traçabilité
-    # --------------------------------------------------------
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def adjust_stock(self, request, pk=None):
@@ -1192,7 +1449,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                 'stock': serializer.data,
             })
 
-        # --- Créer le mouvement AVANT (traçabilité)
         try:
             movement = StockMovement.objects.create(
                 movement_type='adjustment',
@@ -1206,7 +1462,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                 notes=f"Ajustement manuel: {reason} ({old_quantity} → {new_quantity})",
                 created_by=request.user,
             )
-            print(f"✅ Mouvement ajustement créé: {movement.reference}")
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1233,9 +1488,6 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
             'stock': serializer.data,
         })
 
-    # --------------------------------------------------------
-    # POST initialize_stock — avec traçabilité
-    # --------------------------------------------------------
     @action(detail=False, methods=['post'])
     @transaction.atomic
     def initialize_stock(self, request):
@@ -1257,10 +1509,7 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
                     status=400,
                 )
         except (ValueError, TypeError):
-            return Response(
-                {'error': 'Quantité invalide'},
-                status=400,
-            )
+            return Response({'error': 'Quantité invalide'}, status=400)
 
         try:
             product = Product.objects.get(id=product_id)
@@ -1321,10 +1570,10 @@ class WarehouseStockViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(warehouse_stock)
         return Response(serializer.data, status=201)
 
+
 # ============================================================
 # LOCATION BY WAREHOUSE
 # ============================================================
-
 
 class LocationByWarehouseView(generics.ListAPIView):
     serializer_class = LocationSerializer
@@ -1336,7 +1585,7 @@ class LocationByWarehouseView(generics.ListAPIView):
 
 
 # ============================================================
-# INVENTORY DASHBOARD
+# INVENTORY DASHBOARD ✅ CORRIGÉ
 # ============================================================
 
 class InventoryDashboardView(generics.GenericAPIView):
@@ -1354,13 +1603,29 @@ class InventoryDashboardView(generics.GenericAPIView):
         today = timezone.now().date()
         in_30_days = today + timedelta(days=30)
 
+        # ✅ Calcul de la valeur du stock via ProductPricing (par entrepôt)
+        # Sous-requête pour récupérer le prix d'achat actuel d'un produit
+        pricing_subquery = ProductPricing.objects.filter(
+            product=OuterRef('pk'),
+            is_current=True,
+        ).values('purchase_price')[:1]
+
+        products_with_price = products.annotate(
+            current_purchase_price=Subquery(pricing_subquery)
+        )
+
+        total_stock_value = 0
+        for product in products_with_price:
+            price = product.current_purchase_price or 0
+            total_stock_value += (product.stock_quantity or 0) * price
+
         data = {
             'total_warehouses': warehouses.count(),
             'total_products': products.count(),
-            'total_stock_value': products.aggregate(
-                total=Sum(F('stock_quantity') * F('purchase_price'))
-            )['total'] or 0,
-            'low_stock_count': products.filter(stock_quantity__lte=F('minimum_stock')).count(),
+            'total_stock_value': total_stock_value,
+            'low_stock_count': products.filter(
+                stock_quantity__lte=F('minimum_stock')
+            ).count(),
             'out_of_stock_count': products.filter(stock_quantity=0).count(),
             'pending_transfers': Transfer.objects.filter(
                 Q(from_agence__warehouses__in=warehouses) |
