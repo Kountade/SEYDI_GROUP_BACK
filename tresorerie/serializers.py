@@ -1,7 +1,9 @@
 # tresorerie/serializers.py
+
 from rest_framework import serializers
 from django.db.models import Sum
 from django.utils import timezone
+
 from .models import *
 from users.serializers import AgenceSimpleSerializer
 
@@ -29,11 +31,15 @@ class CaisseSerializer(serializers.ModelSerializer):
             'seuil_min', 'seuil_max',
             'est_sous_seuil_min', 'est_sur_seuil_max',
             'is_active', 'is_default', 'description',
-            'mouvements_count', 'created_at', 'updated_at'
+            'mouvements_count', 'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
 
     def get_mouvements_count(self, obj):
+        # ✅ Si le ViewSet a annoté `mouvements_count`, on l'utilise (0 requête)
+        annotated = getattr(obj, 'mouvements_count_annotated', None)
+        if annotated is not None:
+            return annotated
         return obj.mouvements.filter(status='effectue').count()
 
 
@@ -43,7 +49,7 @@ class CaisseCreateSerializer(serializers.ModelSerializer):
         fields = (
             'code', 'nom', 'type_caisse', 'agence', 'responsable',
             'solde_initial', 'seuil_min', 'seuil_max',
-            'is_active', 'is_default', 'description'
+            'is_active', 'is_default', 'description',
         )
 
     def validate_code(self, value):
@@ -73,12 +79,11 @@ class CompteBancaireSerializer(serializers.ModelSerializer):
             'is_active', 'is_default',
             'date_ouverture', 'description',
             'created_by', 'created_by_email',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
 
 
-# ✅ AJOUT: CompteBancaireCreateSerializer (manquant)
 class CompteBancaireCreateSerializer(serializers.ModelSerializer):
     """Serializer pour la création d'un compte bancaire"""
 
@@ -89,13 +94,15 @@ class CompteBancaireCreateSerializer(serializers.ModelSerializer):
             'numero_compte', 'iban', 'bic',
             'devise', 'solde_initial',
             'is_active', 'is_default',
-            'date_ouverture', 'description'
+            'date_ouverture', 'description',
         )
 
     def validate(self, data):
-        if CompteBancaire.objects.filter(
-            agence=data['agence'],
-            numero_compte=data['numero_compte']
+        # ✅ .get() pour éviter KeyError
+        agence = data.get('agence')
+        numero = data.get('numero_compte')
+        if agence and numero and CompteBancaire.objects.filter(
+            agence=agence, numero_compte=numero
         ).exists():
             raise serializers.ValidationError({
                 'numero_compte': 'Ce numéro de compte existe déjà pour cette agence'
@@ -142,7 +149,7 @@ class MouvementTresorerieSerializer(serializers.ModelSerializer):
             'ecriture',
             'created_by', 'created_by_email',
             'valide_par', 'date_validation',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
@@ -157,7 +164,7 @@ class MouvementTresorerieCreateSerializer(serializers.ModelSerializer):
             'caisse', 'compte_bancaire',
             'date_mouvement', 'date_valeur', 'date_prevue',
             'reference_externe', 'piece_justificative',
-            'libelle', 'notes'
+            'libelle', 'notes',
         )
 
     def validate(self, data):
@@ -179,12 +186,6 @@ class MouvementTresorerieCreateSerializer(serializers.ModelSerializer):
 # FRAIS SERIALIZERS
 # ============================================================
 
-# tresorerie/serializers.py
-
-# ============================================================
-# FRAIS SERIALIZERS (version complète)
-# ============================================================
-
 class FraisSerializer(serializers.ModelSerializer):
     categorie_display = serializers.CharField(
         source='get_categorie_display', read_only=True)
@@ -196,13 +197,11 @@ class FraisSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True, default=None)
 
-    # Nouveaux champs pour afficher les noms des destinations
+    # ✅ Noms injectés via select_related côté ViewSet
     caisse_destination_nom = serializers.CharField(
-        source='caisse_destination.nom', read_only=True
-    )
+        source='caisse_destination.nom', read_only=True, default=None)
     compte_destination_nom = serializers.CharField(
-        source='compte_destination.nom', read_only=True
-    )
+        source='compte_destination.nom', read_only=True, default=None)
 
     class Meta:
         model = Frais
@@ -221,7 +220,6 @@ class FraisSerializer(serializers.ModelSerializer):
             'created_by', 'created_by_email',
             'valide_par', 'date_validation',
             'created_at', 'updated_at',
-            # Nouveaux champs
             'caisse_destination', 'caisse_destination_nom',
             'compte_destination', 'compte_destination_nom',
         )
@@ -235,17 +233,17 @@ class FraisCreateSerializer(serializers.ModelSerializer):
             'titre', 'agence', 'categorie', 'montant',
             'date_frais', 'date_paiement', 'beneficiaire',
             'piece_justificative', 'mode_paiement', 'status', 'notes',
-            'caisse_destination', 'compte_destination'
+            'caisse_destination', 'compte_destination',
         )
 
     def validate(self, data):
-        # Validation du montant
-        if data.get('montant', 0) <= 0:
+        # ✅ .get() avec fallback 0
+        montant = data.get('montant', 0)
+        if montant is not None and montant <= 0:
             raise serializers.ValidationError({
                 'montant': 'Le montant doit être supérieur à 0'
             })
 
-        # Validation des destinations
         caisse = data.get('caisse_destination')
         compte = data.get('compte_destination')
         if caisse and compte:
@@ -253,24 +251,23 @@ class FraisCreateSerializer(serializers.ModelSerializer):
                 "Choisissez une seule destination (caisse ou compte)."
             )
 
-        # Vérifier que la destination appartient à la même agence
         agence = data.get('agence')
         if agence:
-            if caisse and caisse.agence != agence:
+            if caisse and caisse.agence_id != agence.id:
                 raise serializers.ValidationError({
                     'caisse_destination': 'La caisse doit appartenir à la même agence.'
                 })
-            if compte and compte.agence != agence:
+            if compte and compte.agence_id != agence.id:
                 raise serializers.ValidationError({
                     'compte_destination': 'Le compte bancaire doit appartenir à la même agence.'
                 })
 
         return data
 
+
 # ============================================================
 # PRÉVISIONS SERIALIZERS
 # ============================================================
-
 
 class PrevisionTresorerieSerializer(serializers.ModelSerializer):
     type_prevision_display = serializers.CharField(
@@ -296,12 +293,11 @@ class PrevisionTresorerieSerializer(serializers.ModelSerializer):
             'probabilite',
             'ecart', 'pourcentage_ecart',
             'notes',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
 
-# ✅ AJOUT: PrevisionTresorerieCreateSerializer (manquant)
 class PrevisionTresorerieCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = PrevisionTresorerie
@@ -309,15 +305,16 @@ class PrevisionTresorerieCreateSerializer(serializers.ModelSerializer):
             'titre', 'agence', 'type_prevision', 'periode',
             'montant_prevu', 'date_debut', 'date_fin',
             'source_type', 'source_id', 'categorie', 'sous_categorie',
-            'statut', 'probabilite', 'notes'
+            'statut', 'probabilite', 'notes',
         )
 
     def validate(self, data):
-        if data.get('date_debut') and data.get('date_fin'):
-            if data['date_debut'] > data['date_fin']:
-                raise serializers.ValidationError({
-                    'date_debut': 'La date début doit être antérieure à la date fin'
-                })
+        debut = data.get('date_debut')
+        fin = data.get('date_fin')
+        if debut and fin and debut > fin:
+            raise serializers.ValidationError({
+                'date_debut': 'La date début doit être antérieure à la date fin'
+            })
         return data
 
 
@@ -346,12 +343,11 @@ class RapprochementBancaireSerializer(serializers.ModelSerializer):
             'encours_emission', 'encours_encaissement',
             'commissions', 'autres_ecarts',
             'notes',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
 
-# ✅ AJOUT: RapprochementBancaireCreateSerializer (manquant)
 class RapprochementBancaireCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = RapprochementBancaire
@@ -362,15 +358,16 @@ class RapprochementBancaireCreateSerializer(serializers.ModelSerializer):
             'status',
             'encours_emission', 'encours_encaissement',
             'commissions', 'autres_ecarts',
-            'notes'
+            'notes',
         )
 
     def validate(self, data):
-        if data.get('date_debut') and data.get('date_fin'):
-            if data['date_debut'] > data['date_fin']:
-                raise serializers.ValidationError({
-                    'date_debut': 'La date début doit être antérieure à la date fin'
-                })
+        debut = data.get('date_debut')
+        fin = data.get('date_fin')
+        if debut and fin and debut > fin:
+            raise serializers.ValidationError({
+                'date_debut': 'La date début doit être antérieure à la date fin'
+            })
         return data
 
 
@@ -393,7 +390,7 @@ class TresorerieJournaliereSerializer(serializers.ModelSerializer):
             'entrees_ventes', 'entrees_reglements', 'entrees_autres',
             'sorties_achats', 'sorties_frais', 'sorties_salaires', 'sorties_autres',
             'nb_operations', 'nb_entrees', 'nb_sorties',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
 

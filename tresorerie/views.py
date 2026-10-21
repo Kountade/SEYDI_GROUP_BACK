@@ -1,29 +1,49 @@
 # tresorerie/views.py
+
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.db.models import Q, Sum, Count
+
+from django.db.models import Q, Sum, Count, F
+from django.core.cache import cache
 from django.utils import timezone
-from datetime import timedelta
+
 from .models import *
 from .serializers import *
+from .pagination import (
+    CaissePagination, ComptePagination, MouvementPagination,
+    FraisPagination, PrevisionPagination, RapprochementPagination,
+    TresorerieJournalierePagination,
+)
 from .permissions import *
 from users.permissions import IsPDG, IsDRH, IsPDGOrDRH, IsChefAgence, IsComptable
 
 
 # ============================================================
-# TRÉSORERIE GLOBALE (API View pour le dashboard)
+# CACHE
 # ============================================================
+def _purge_tresorerie_cache():
+    try:
+        cache.delete_pattern('tresorerie_*')
+    except Exception:
+        cache.clear()
 
+
+# ============================================================
+# TRÉSORERIE GLOBALE (CACHE 60s)
+# ============================================================
 class TresorerieGlobalView(APIView):
-    """Vue pour le solde global de trésorerie"""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         agence_id = request.query_params.get('agence_id')
+        cache_key = f'tresorerie_global_{agence_id or "all"}'
 
-        # Filtrer par agence si spécifié
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+
         caisses_qs = Caisse.objects.filter(is_active=True)
         comptes_qs = CompteBancaire.objects.filter(is_active=True)
 
@@ -31,127 +51,173 @@ class TresorerieGlobalView(APIView):
             caisses_qs = caisses_qs.filter(agence_id=agence_id)
             comptes_qs = comptes_qs.filter(agence_id=agence_id)
 
-        # Calculer les soldes
-        solde_caisses = caisses_qs.aggregate(
-            total=Sum('solde_actuel'))['total'] or 0
-        solde_banques = comptes_qs.aggregate(
-            total=Sum('solde_actuel'))['total'] or 0
-        solde_global = solde_caisses + solde_banques
+        caisses_agg = caisses_qs.aggregate(
+            solde=Sum('solde_actuel'), count=Count('id'),
+        )
+        comptes_agg = comptes_qs.aggregate(
+            solde=Sum('solde_actuel'), count=Count('id'),
+        )
+
+        solde_caisses = caisses_agg['solde'] or 0
+        solde_banques = comptes_agg['solde'] or 0
 
         data = {
-            'solde_global': solde_global,
+            'solde_global': solde_caisses + solde_banques,
             'solde_caisses': solde_caisses,
             'solde_banques': solde_banques,
-            'nb_caisses': caisses_qs.count(),
-            'nb_comptes': comptes_qs.count()
+            'nb_caisses': caisses_agg['count'] or 0,
+            'nb_comptes': comptes_agg['count'] or 0,
         }
 
+        cache.set(cache_key, data, 60)
         serializer = TresorerieGlobalSerializer(data)
         return Response(serializer.data)
 
 
 # ============================================================
-# ALERTES TRÉSORERIE (API View)
+# ALERTES TRÉSORERIE (CACHE 60s)
 # ============================================================
-
 class AlertesTresorerieView(APIView):
-    """Vue pour les alertes de trésorerie"""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         agence_id = request.query_params.get('agence_id')
+        cache_key = f'tresorerie_alertes_{agence_id or "all"}'
+
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
 
         alertes = []
 
-        # Filtrer les caisses par agence
         caisses_qs = Caisse.objects.filter(is_active=True)
         if agence_id:
             caisses_qs = caisses_qs.filter(agence_id=agence_id)
 
-        # Vérifier les caisses sous seuil
-        for caisse in caisses_qs:
-            if caisse.est_sous_seuil_min:
-                alertes.append({
-                    'id': f'caisse_{caisse.id}',
-                    'type': 'warning',
-                    'message': f'Caisse {caisse.nom} sous le seuil minimum ({caisse.solde_actuel} < {caisse.seuil_min})',
-                    'est_active': True,
-                    'caisse_id': caisse.id,
-                    'caisse_nom': caisse.nom
-                })
-            if caisse.est_sur_seuil_max:
-                alertes.append({
-                    'id': f'caisse_max_{caisse.id}',
-                    'type': 'info',
-                    'message': f'Caisse {caisse.nom} dépasse le seuil maximum ({caisse.solde_actuel} > {caisse.seuil_max})',
-                    'est_active': True,
-                    'caisse_id': caisse.id,
-                    'caisse_nom': caisse.nom
-                })
+        # ✅ Filtrage 100 % SQL (pas de boucle Python)
+        caisses_sous_seuil = caisses_qs.filter(solde_actuel__lt=F('seuil_min'))
+        caisses_sur_seuil = caisses_qs.filter(
+            seuil_max__gt=0, solde_actuel__gt=F('seuil_max')
+        )
 
-        # Vérifier les comptes bancaires avec solde bas
+        for c in caisses_sous_seuil.values('id', 'nom', 'solde_actuel', 'seuil_min'):
+            alertes.append({
+                'id': f"caisse_{c['id']}",
+                'type': 'warning',
+                'message': f"Caisse {c['nom']} sous le seuil minimum "
+                           f"({c['solde_actuel']} < {c['seuil_min']})",
+                           'est_active': True,
+                           'caisse_id': c['id'],
+                           'caisse_nom': c['nom'],
+                           })
+
+        for c in caisses_sur_seuil.values('id', 'nom', 'solde_actuel', 'seuil_max'):
+            alertes.append({
+                'id': f"caisse_max_{c['id']}",
+                'type': 'info',
+                'message': f"Caisse {c['nom']} dépasse le seuil maximum "
+                           f"({c['solde_actuel']} > {c['seuil_max']})",
+                           'est_active': True,
+                           'caisse_id': c['id'],
+                           'caisse_nom': c['nom'],
+                           })
+
         comptes_qs = CompteBancaire.objects.filter(is_active=True)
         if agence_id:
             comptes_qs = comptes_qs.filter(agence_id=agence_id)
 
-        for compte in comptes_qs:
-            if compte.solde_actuel < 0:
-                alertes.append({
-                    'id': f'compte_{compte.id}',
-                    'type': 'error',
-                    'message': f'Compte {compte.nom} en négatif ({compte.solde_actuel})',
-                    'est_active': True,
-                    'compte_id': compte.id,
-                    'compte_nom': compte.nom
-                })
+        comptes_negatifs = comptes_qs.filter(solde_actuel__lt=0)
+        for c in comptes_negatifs.values('id', 'nom', 'solde_actuel'):
+            alertes.append({
+                'id': f"compte_{c['id']}",
+                'type': 'error',
+                'message': f"Compte {c['nom']} en négatif ({c['solde_actuel']})",
+                'est_active': True,
+                'compte_id': c['id'],
+                'compte_nom': c['nom'],
+            })
 
+        cache.set(cache_key, alertes, 60)
         return Response(alertes)
 
 
 # ============================================================
 # CAISSE VIEWSET
 # ============================================================
-
 class CaisseViewset(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated,
                           IsPDGOrDRH | IsChefAgence | IsComptable]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['code', 'nom', 'description']
     ordering_fields = ['code', 'nom', 'solde_actuel']
+    pagination_class = CaissePagination
 
     def get_serializer_class(self):
-        if self.action == 'create':
+        if self.action in ['create', 'update', 'partial_update']:
             return CaisseCreateSerializer
         return CaisseSerializer
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            return Caisse.objects.filter(is_active=True)
-        agences_ids = user.get_agences().values_list('id', flat=True)
-        return Caisse.objects.filter(agence_id__in=agences_ids, is_active=True)
+        qs = (
+            Caisse.objects
+            .select_related('agence', 'responsable', 'created_by')
+            .annotate(
+                mouvements_count_annotated=Count(
+                    'mouvements',
+                    filter=Q(mouvements__status='effectue'),
+                    distinct=True,
+                )
+            )
+        )
+
+        if not (user.est_pdg() or user.est_drh()):
+            agences_ids = user.get_agences().values_list('id', flat=True)
+            qs = qs.filter(agence_id__in=agences_ids)
+
+        return qs.filter(is_active=True)
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+        _purge_tresorerie_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        _purge_tresorerie_cache()
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.save(update_fields=['is_active', 'updated_at'])
+        _purge_tresorerie_cache()
 
     @action(detail=True, methods=['get'])
     def mouvements(self, request, pk=None):
         caisse = self.get_object()
-        mouvements = caisse.mouvements.filter(
-            status='effectue').order_by('-date_mouvement')
-        serializer = MouvementTresorerieSerializer(mouvements, many=True)
-        return Response(serializer.data)
+        qs = (
+            caisse.mouvements
+            .filter(status='effectue')
+            .select_related('agence', 'caisse', 'compte_bancaire', 'created_by', 'valide_par')
+            .order_by('-date_mouvement')
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                MouvementTresorerieSerializer(page, many=True).data
+            )
+        return Response(MouvementTresorerieSerializer(qs, many=True).data)
 
 
 # ============================================================
 # COMPTE BANCAIRE VIEWSET
 # ============================================================
-
 class CompteBancaireViewset(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated,
                           IsPDGOrDRH | IsChefAgence | IsComptable]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['banque', 'nom', 'numero_compte', 'code']
     ordering_fields = ['banque', 'nom', 'solde_actuel']
+    pagination_class = ComptePagination
 
-    # ✅ CORRIGÉ: get_serializer_class avec tous les serializers
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
             return CompteBancaireCreateSerializer
@@ -159,30 +225,54 @@ class CompteBancaireViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            return CompteBancaire.objects.filter(is_active=True)
-        agences_ids = user.get_agences().values_list('id', flat=True)
-        return CompteBancaire.objects.filter(agence_id__in=agences_ids, is_active=True)
+        qs = CompteBancaire.objects.select_related('agence', 'created_by')
+
+        if not (user.est_pdg() or user.est_drh()):
+            agences_ids = user.get_agences().values_list('id', flat=True)
+            qs = qs.filter(agence_id__in=agences_ids)
+
+        return qs.filter(is_active=True)
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+        _purge_tresorerie_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        _purge_tresorerie_cache()
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.save(update_fields=['is_active', 'updated_at'])
+        _purge_tresorerie_cache()
 
     @action(detail=True, methods=['get'])
     def mouvements(self, request, pk=None):
         compte = self.get_object()
-        mouvements = compte.mouvements.filter(
-            status='effectue').order_by('-date_mouvement')
-        serializer = MouvementTresorerieSerializer(mouvements, many=True)
-        return Response(serializer.data)
+        qs = (
+            compte.mouvements
+            .filter(status='effectue')
+            .select_related('agence', 'caisse', 'compte_bancaire', 'created_by', 'valide_par')
+            .order_by('-date_mouvement')
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                MouvementTresorerieSerializer(page, many=True).data
+            )
+        return Response(MouvementTresorerieSerializer(qs, many=True).data)
 
 
 # ============================================================
 # MOUVEMENT DE TRÉSORERIE VIEWSET
 # ============================================================
-
 class MouvementTresorerieViewset(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated,
                           IsPDGOrDRH | IsChefAgence | IsComptable]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['reference', 'libelle', 'source_reference']
     ordering_fields = ['date_mouvement', 'montant', 'created_at']
+    pagination_class = MouvementPagination
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -191,71 +281,71 @@ class MouvementTresorerieViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            queryset = MouvementTresorerie.objects.all()
-        else:
+        qs = (
+            MouvementTresorerie.objects
+            .select_related('agence', 'caisse', 'compte_bancaire',
+                            'created_by', 'valide_par', 'ecriture')
+        )
+
+        if not (user.est_pdg() or user.est_drh()):
             agences_ids = user.get_agences().values_list('id', flat=True)
-            queryset = MouvementTresorerie.objects.filter(
-                agence_id__in=agences_ids)
+            qs = qs.filter(agence_id__in=agences_ids)
 
-        # Filtres
-        type_mouvement = self.request.query_params.get('type_mouvement')
-        if type_mouvement:
-            queryset = queryset.filter(type_mouvement=type_mouvement)
+        params = self.request.query_params
 
-        status = self.request.query_params.get('status')
-        if status:
-            queryset = queryset.filter(status=status)
+        t = params.get('type_mouvement')
+        if t:
+            qs = qs.filter(type_mouvement=t)
 
-        date_debut = self.request.query_params.get('date_debut')
+        s = params.get('status')
+        if s:
+            qs = qs.filter(status=s)
+
+        date_debut = params.get('date_debut')
         if date_debut:
-            queryset = queryset.filter(date_mouvement__date__gte=date_debut)
+            qs = qs.filter(date_mouvement__date__gte=date_debut)
 
-        date_fin = self.request.query_params.get('date_fin')
+        date_fin = params.get('date_fin')
         if date_fin:
-            queryset = queryset.filter(date_mouvement__date__lte=date_fin)
+            qs = qs.filter(date_mouvement__date__lte=date_fin)
 
-        return queryset.select_related('agence', 'caisse', 'compte_bancaire', 'created_by')
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+        _purge_tresorerie_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        _purge_tresorerie_cache()
 
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
         mouvement = self.get_object()
         if mouvement.status == 'effectue':
-            return Response({"error": "Ce mouvement est déjà effectué"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Ce mouvement est déjà effectué"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         mouvement.status = 'effectue'
         mouvement.valide_par = request.user
         mouvement.date_validation = timezone.now()
-        mouvement._mettre_a_jour_soldes()
+        # ✅ La méthode save() du modèle gère les soldes → pas d'appel manuel
         mouvement.save()
+        _purge_tresorerie_cache()
 
-        serializer = self.get_serializer(mouvement)
-        return Response(serializer.data)
+        return Response(self.get_serializer(mouvement).data)
 
     @action(detail=True, methods=['post'])
     def annuler(self, request, pk=None):
         mouvement = self.get_object()
-        if mouvement.status == 'effectue':
-            # Inverser les soldes
-            if mouvement.caisse:
-                if mouvement.type_mouvement == 'encaissement':
-                    mouvement.caisse.solde_actuel -= mouvement.montant
-                else:
-                    mouvement.caisse.solde_actuel += mouvement.montant
-                mouvement.caisse.save()
-
-            if mouvement.compte_bancaire:
-                if mouvement.type_mouvement == 'encaissement':
-                    mouvement.compte_bancaire.solde_actuel -= mouvement.montant
-                else:
-                    mouvement.compte_bancaire.solde_actuel += mouvement.montant
-                mouvement.compte_bancaire.save()
-
+        # ✅ La méthode save() gère l'inversion si ancien=effectue → nouveau!=effectue
         mouvement.status = 'annule'
         mouvement.save()
+        _purge_tresorerie_cache()
 
-        serializer = self.get_serializer(mouvement)
-        return Response(serializer.data)
+        return Response(self.get_serializer(mouvement).data)
 
 
 # ============================================================
@@ -267,6 +357,7 @@ class FraisViewset(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['reference', 'titre', 'beneficiaire']
     ordering_fields = ['date_frais', 'montant', 'created_at']
+    pagination_class = FraisPagination
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -275,59 +366,79 @@ class FraisViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            queryset = Frais.objects.all()
-        else:
+        qs = (
+            Frais.objects
+            .select_related(
+                'agence', 'created_by', 'valide_par',
+                'caisse_destination', 'compte_destination', 'mouvement',
+            )
+        )
+
+        if not (user.est_pdg() or user.est_drh()):
             agences_ids = user.get_agences().values_list('id', flat=True)
-            queryset = Frais.objects.filter(agence_id__in=agences_ids)
+            qs = qs.filter(agence_id__in=agences_ids)
 
-        status = self.request.query_params.get('status')
-        if status:
-            queryset = queryset.filter(status=status)
+        params = self.request.query_params
 
-        categorie = self.request.query_params.get('categorie')
-        if categorie:
-            queryset = queryset.filter(categorie=categorie)
+        s = params.get('status')
+        if s:
+            qs = qs.filter(status=s)
 
-        return queryset.select_related('agence', 'created_by')
+        c = params.get('categorie')
+        if c:
+            qs = qs.filter(categorie=c)
+
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+        _purge_tresorerie_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        _purge_tresorerie_cache()
 
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
         frais = self.get_object()
         if frais.status == 'valide':
-            return Response({"error": "Ce frais est déjà validé"}, status=status.HTTP_400_BAD_REQUEST)
-
+            return Response(
+                {"error": "Ce frais est déjà validé"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         frais.status = 'valide'
         frais.valide_par = request.user
         frais.date_validation = timezone.now()
         frais.save()
-
-        serializer = self.get_serializer(frais)
-        return Response(serializer.data)
+        _purge_tresorerie_cache()
+        return Response(self.get_serializer(frais).data)
 
     @action(detail=True, methods=['post'])
     def payer(self, request, pk=None):
         frais = self.get_object()
         if frais.status == 'paye':
-            return Response({"error": "Ce frais est déjà payé"}, status=status.HTTP_400_BAD_REQUEST)
-
+            return Response(
+                {"error": "Ce frais est déjà payé"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         frais.status = 'paye'
         frais.date_paiement = timezone.now().date()
+        # ✅ Le save() du modèle crée le mouvement de trésorerie associé
         frais.save()
+        _purge_tresorerie_cache()
+        return Response(self.get_serializer(frais).data)
 
-        serializer = self.get_serializer(frais)
-        return Response(serializer.data)
+
 # ============================================================
 # PRÉVISIONS VIEWSET
 # ============================================================
-
-
 class PrevisionTresorerieViewset(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated,
                           IsPDGOrDRH | IsChefAgence | IsComptable]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['reference', 'titre']
     ordering_fields = ['date_debut', 'montant_prevu', 'created_at']
+    pagination_class = PrevisionPagination
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -336,34 +447,44 @@ class PrevisionTresorerieViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            queryset = PrevisionTresorerie.objects.all()
-        else:
+        qs = PrevisionTresorerie.objects.select_related('agence', 'created_by')
+
+        if not (user.est_pdg() or user.est_drh()):
             agences_ids = user.get_agences().values_list('id', flat=True)
-            queryset = PrevisionTresorerie.objects.filter(
-                agence_id__in=agences_ids)
+            qs = qs.filter(agence_id__in=agences_ids)
 
-        type_prevision = self.request.query_params.get('type_prevision')
-        if type_prevision:
-            queryset = queryset.filter(type_prevision=type_prevision)
+        params = self.request.query_params
 
-        statut = self.request.query_params.get('statut')
-        if statut:
-            queryset = queryset.filter(statut=statut)
+        tp = params.get('type_prevision')
+        if tp:
+            qs = qs.filter(type_prevision=tp)
 
-        return queryset.select_related('agence', 'created_by')
+        s = params.get('statut')
+        if s:
+            qs = qs.filter(statut=s)
+
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+        _purge_tresorerie_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        _purge_tresorerie_cache()
 
 
 # ============================================================
 # RAPPROCHEMENT VIEWSET
 # ============================================================
-
 class RapprochementBancaireViewset(viewsets.ModelViewSet):
     permission_classes = [
-        permissions.IsAuthenticated, IsPDGOrDRH | IsComptable]
+        permissions.IsAuthenticated, IsPDGOrDRH | IsComptable,
+    ]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['reference']
     ordering_fields = ['date_debut', 'created_at']
+    pagination_class = RapprochementPagination
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -372,60 +493,71 @@ class RapprochementBancaireViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            queryset = RapprochementBancaire.objects.all()
-        else:
+        qs = RapprochementBancaire.objects.select_related(
+            'agence', 'compte_bancaire', 'created_by', 'valide_par',
+        )
+
+        if not (user.est_pdg() or user.est_drh()):
             agences_ids = user.get_agences().values_list('id', flat=True)
-            queryset = RapprochementBancaire.objects.filter(
-                agence_id__in=agences_ids)
+            qs = qs.filter(agence_id__in=agences_ids)
 
-        status = self.request.query_params.get('status')
-        if status:
-            queryset = queryset.filter(status=status)
+        s = self.request.query_params.get('status')
+        if s:
+            qs = qs.filter(status=s)
 
-        return queryset.select_related('agence', 'compte_bancaire', 'created_by')
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+        _purge_tresorerie_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        _purge_tresorerie_cache()
 
     @action(detail=True, methods=['post'])
     def valider(self, request, pk=None):
         rapprochement = self.get_object()
         if rapprochement.status == 'complete':
-            return Response({"error": "Ce rapprochement est déjà complet"}, status=status.HTTP_400_BAD_REQUEST)
-
+            return Response(
+                {"error": "Ce rapprochement est déjà complet"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         rapprochement.status = 'complete'
         rapprochement.valide_par = request.user
         rapprochement.date_validation = timezone.now()
         rapprochement.save()
-
-        serializer = self.get_serializer(rapprochement)
-        return Response(serializer.data)
+        _purge_tresorerie_cache()
+        return Response(self.get_serializer(rapprochement).data)
 
 
 # ============================================================
 # TRÉSORERIE JOURNALIÈRE VIEWSET
 # ============================================================
-
 class TresorerieJournaliereViewset(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticated,
                           IsPDGOrDRH | IsChefAgence | IsComptable]
     serializer_class = TresorerieJournaliereSerializer
     filter_backends = [filters.OrderingFilter]
     ordering_fields = ['date']
+    pagination_class = TresorerieJournalierePagination
 
     def get_queryset(self):
         user = self.request.user
-        if user.est_pdg() or user.est_drh():
-            queryset = TresorerieJournaliere.objects.all()
-        else:
+        qs = TresorerieJournaliere.objects.select_related('agence')
+
+        if not (user.est_pdg() or user.est_drh()):
             agences_ids = user.get_agences().values_list('id', flat=True)
-            queryset = TresorerieJournaliere.objects.filter(
-                agence_id__in=agences_ids)
+            qs = qs.filter(agence_id__in=agences_ids)
 
-        date_debut = self.request.query_params.get('date_debut')
+        params = self.request.query_params
+
+        date_debut = params.get('date_debut')
         if date_debut:
-            queryset = queryset.filter(date__gte=date_debut)
+            qs = qs.filter(date__gte=date_debut)
 
-        date_fin = self.request.query_params.get('date_fin')
+        date_fin = params.get('date_fin')
         if date_fin:
-            queryset = queryset.filter(date__lte=date_fin)
+            qs = qs.filter(date__lte=date_fin)
 
-        return queryset.select_related('agence')
+        return qs

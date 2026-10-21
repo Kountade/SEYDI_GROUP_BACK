@@ -1,11 +1,10 @@
-from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
-from django.db import models
+# tresorerie/models.py
 
-# Create your models here.
-from django.db import models
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.db import models
 from django.utils import timezone
+
 from users.models import CustomUser, Agence
 from comptabilite.models import PlanComptable, Ecriture, LigneEcriture
 
@@ -13,9 +12,6 @@ from comptabilite.models import PlanComptable, Ecriture, LigneEcriture
 # ============================================================
 # 1. CAISSES
 # ============================================================
-
-# tresorerie/models.py - Modèle Caisse avec gestion améliorée de is_default
-
 class Caisse(models.Model):
     """
     Caisse physique ou virtuelle
@@ -30,23 +26,37 @@ class Caisse(models.Model):
     code = models.CharField(max_length=20, unique=True,
                             verbose_name="Code caisse")
     nom = models.CharField(max_length=100, verbose_name="Nom de la caisse")
-    type_caisse = models.CharField(max_length=20, choices=TYPE_CAISSE, default='principale',
-                                   verbose_name="Type de caisse")
+    type_caisse = models.CharField(
+        max_length=20, choices=TYPE_CAISSE, default='principale',
+        verbose_name="Type de caisse"
+    )
 
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='caisses',
-                               verbose_name="Agence")
-    responsable = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-                                    related_name='caisses_gerrees', verbose_name="Responsable")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='caisses', verbose_name="Agence"
+    )
+    responsable = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='caisses_gerrees', verbose_name="Responsable"
+    )
 
-    solde_initial = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                        verbose_name="Solde initial")
-    solde_actuel = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                       verbose_name="Solde actuel")
+    solde_initial = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde initial"
+    )
+    solde_actuel = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde actuel"
+    )
 
-    seuil_min = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                    verbose_name="Seuil minimum")
-    seuil_max = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                    verbose_name="Seuil maximum")
+    seuil_min = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Seuil minimum"
+    )
+    seuil_max = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Seuil maximum"
+    )
 
     devise = models.CharField(
         max_length=3, default='GNF', verbose_name="Devise")
@@ -59,14 +69,22 @@ class Caisse(models.Model):
         blank=True, null=True, verbose_name="Description")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                   related_name='caisses_crees', verbose_name="Créé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='caisses_crees', verbose_name="Créé par"
+    )
 
     class Meta:
         verbose_name = "Caisse"
         verbose_name_plural = "Caisses"
         ordering = ['code']
         unique_together = ['agence', 'code']
+        indexes = [
+            models.Index(fields=['agence', 'is_active'],
+                         name='caisse_ag_active_idx'),
+            models.Index(fields=['is_default'], name='caisse_default_idx'),
+            models.Index(fields=['-updated_at'], name='caisse_updated_idx'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.nom} ({self.agence.nom})"
@@ -74,29 +92,24 @@ class Caisse(models.Model):
     def save(self, *args, **kwargs):
         # ✅ Si cette caisse est marquée comme par défaut
         if self.is_default:
-            # Retirer le statut par défaut des autres caisses de la même agence
             Caisse.objects.filter(
                 agence=self.agence,
-                is_default=True
+                is_default=True,
             ).exclude(pk=self.pk).update(is_default=False)
 
         # ✅ Si cette caisse perd son statut par défaut ET qu'il n'y a pas d'autre caisse par défaut
-        # ET qu'il existe d'autres caisses actives dans la même agence
         if not self.is_default:
-            # Vérifier s'il existe une autre caisse par défaut
             has_other_default = Caisse.objects.filter(
                 agence=self.agence,
-                is_default=True
+                is_default=True,
             ).exclude(pk=self.pk).exists()
 
-            # S'il n'y a pas d'autre caisse par défaut, mais qu'il y a d'autres caisses actives
             if not has_other_default:
                 other_active_caisse = Caisse.objects.filter(
                     agence=self.agence,
-                    is_active=True
+                    is_active=True,
                 ).exclude(pk=self.pk).first()
 
-                # Si une autre caisse active existe, la définir comme par défaut
                 if other_active_caisse:
                     other_active_caisse.is_default = True
                     other_active_caisse.save(update_fields=['is_default'])
@@ -121,7 +134,6 @@ class Caisse(models.Model):
 # ============================================================
 # 2. COMPTES BANCAIRES
 # ============================================================
-
 class CompteBancaire(models.Model):
     """
     Compte bancaire de l'entreprise
@@ -136,11 +148,15 @@ class CompteBancaire(models.Model):
     code = models.CharField(max_length=20, unique=True,
                             verbose_name="Code compte")
     nom = models.CharField(max_length=100, verbose_name="Nom du compte")
-    type_compte = models.CharField(max_length=20, choices=TYPE_COMPTE, default='courant',
-                                   verbose_name="Type de compte")
+    type_compte = models.CharField(
+        max_length=20, choices=TYPE_COMPTE, default='courant',
+        verbose_name="Type de compte"
+    )
 
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='comptes_bancaires',
-                               verbose_name="Agence")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='comptes_bancaires', verbose_name="Agence"
+    )
 
     numero_compte = models.CharField(
         max_length=50, verbose_name="Numéro de compte")
@@ -151,29 +167,42 @@ class CompteBancaire(models.Model):
 
     devise = models.CharField(
         max_length=3, default='GNF', verbose_name="Devise")
-    solde_initial = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                        verbose_name="Solde initial")
-    solde_actuel = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                       verbose_name="Solde actuel")
+    solde_initial = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde initial"
+    )
+    solde_actuel = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde actuel"
+    )
 
     is_active = models.BooleanField(default=True, verbose_name="Actif")
     is_default = models.BooleanField(
         default=False, verbose_name="Compte par défaut")
 
     date_ouverture = models.DateField(
-        default=timezone.now, verbose_name="Date d'ouverture")
+        default=timezone.now, verbose_name="Date d'ouverture"
+    )
     description = models.TextField(
         blank=True, null=True, verbose_name="Description")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                   related_name='comptes_bancaires_crees', verbose_name="Créé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='comptes_bancaires_crees', verbose_name="Créé par"
+    )
 
     class Meta:
         verbose_name = "Compte bancaire"
         verbose_name_plural = "Comptes bancaires"
         ordering = ['banque', 'code']
         unique_together = ['agence', 'code', 'numero_compte']
+        indexes = [
+            models.Index(fields=['agence', 'is_active'],
+                         name='compte_ag_active_idx'),
+            models.Index(fields=['is_default'], name='compte_default_idx'),
+            models.Index(fields=['banque'], name='compte_banque_idx'),
+        ]
 
     def __str__(self):
         return f"{self.banque} - {self.nom} ({self.numero_compte})"
@@ -182,12 +211,6 @@ class CompteBancaire(models.Model):
 # ============================================================
 # 3. MOUVEMENTS DE TRÉSORERIE
 # ============================================================
-
-# tresorerie/models.py
-
-# tresorerie/models.py
-
-
 class MouvementTresorerie(models.Model):
     """
     Mouvement de trésorerie (entrée ou sortie d'argent)
@@ -208,8 +231,8 @@ class MouvementTresorerie(models.Model):
         ('salaire', 'Salaire'),
         ('frais', 'Frais'),
         ('payment', 'Paiement fournisseur'),
-        ('paiement', 'Paiement'),                    # ✅ AJOUT
-        ('paiement_client', 'Paiement client'),      # ✅ AJOUT
+        ('paiement', 'Paiement'),
+        ('paiement_client', 'Paiement client'),
         ('caisse', 'Caisse'),
         ('compte_bancaire', 'Compte bancaire'),
         ('autre', 'Autre'),
@@ -221,7 +244,7 @@ class MouvementTresorerie(models.Model):
         ('cheque', 'Chèque'),
         ('virement', 'Virement'),
         ('mobile_money', 'Mobile Money'),
-        ('mobile', 'Mobile Money (court)'),          # ✅ AJOUT
+        ('mobile', 'Mobile Money (court)'),
         ('prelevement', 'Prélèvement'),
         ('autre', 'Autre'),
     )
@@ -237,107 +260,116 @@ class MouvementTresorerie(models.Model):
     reference = models.CharField(
         max_length=50, unique=True, verbose_name="Référence")
 
-    # ✅ max_length augmenté à 50 pour éviter les erreurs
     type_mouvement = models.CharField(
-        max_length=50, choices=TYPE_MOUVEMENT, verbose_name="Type de mouvement")
+        max_length=50, choices=TYPE_MOUVEMENT, verbose_name="Type de mouvement"
+    )
 
     agence = models.ForeignKey(
         Agence, on_delete=models.PROTECT,
-        related_name='mouvements_tresorerie', verbose_name="Agence")
+        related_name='mouvements_tresorerie', verbose_name="Agence"
+    )
 
-    # Source du mouvement
-    # ✅ max_length augmenté à 50
     source_type = models.CharField(
-        max_length=50, choices=SOURCE_TYPE, verbose_name="Type source")
+        max_length=50, choices=SOURCE_TYPE, verbose_name="Type source"
+    )
     source_id = models.IntegerField(
         null=True, blank=True, verbose_name="ID source")
     source_reference = models.CharField(
-        max_length=100, blank=True, null=True, verbose_name="Référence source")
+        max_length=100, blank=True, null=True, verbose_name="Référence source"
+    )
 
-    # Montant
     montant = models.DecimalField(
         max_digits=15, decimal_places=2,
-        validators=[MinValueValidator(0)], verbose_name="Montant")
+        validators=[MinValueValidator(0)], verbose_name="Montant"
+    )
 
-    # Mode de paiement
-    # ✅ max_length augmenté à 50
     mode_paiement = models.CharField(
-        max_length=50, choices=MODE_PAIEMENT, verbose_name="Mode de paiement")
+        max_length=50, choices=MODE_PAIEMENT, verbose_name="Mode de paiement"
+    )
 
-    # Caisse ou compte bancaire
     caisse = models.ForeignKey(
         'Caisse', on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='mouvements', verbose_name="Caisse")
+        related_name='mouvements', verbose_name="Caisse"
+    )
     compte_bancaire = models.ForeignKey(
         'CompteBancaire', on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='mouvements', verbose_name="Compte bancaire")
+        related_name='mouvements', verbose_name="Compte bancaire"
+    )
 
-    # Dates
     date_mouvement = models.DateTimeField(
-        default=timezone.now, verbose_name="Date du mouvement")
+        default=timezone.now, verbose_name="Date du mouvement"
+    )
     date_valeur = models.DateField(verbose_name="Date de valeur")
     date_prevue = models.DateField(
         null=True, blank=True, verbose_name="Date prévue")
 
-    # Statut
-    # ✅ max_length augmenté à 50
     status = models.CharField(
         max_length=50, choices=STATUS_CHOICES, default='planifie',
-        verbose_name="Statut")
+        verbose_name="Statut"
+    )
 
-    # Références externes
     reference_externe = models.CharField(
-        max_length=100, blank=True, null=True, verbose_name="Référence externe")
+        max_length=100, blank=True, null=True, verbose_name="Référence externe"
+    )
     piece_justificative = models.CharField(
-        max_length=50, blank=True, null=True, verbose_name="Pièce justificative")
+        max_length=50, blank=True, null=True, verbose_name="Pièce justificative"
+    )
 
-    # Rapprochement
     date_rapprochement = models.DateField(
-        null=True, blank=True, verbose_name="Date rapprochement")
+        null=True, blank=True, verbose_name="Date rapprochement"
+    )
     rapproche = models.BooleanField(default=False, verbose_name="Rapproché")
 
-    # Libellé et notes
     libelle = models.CharField(max_length=200, verbose_name="Libellé")
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
 
-    # Lien vers l'écriture comptable
     ecriture = models.ForeignKey(
         'comptabilite.Ecriture', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='mouvements_tresorerie',
-        verbose_name="Écriture comptable")
+        verbose_name="Écriture comptable"
+    )
 
-    # Création et validation
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
         CustomUser, on_delete=models.SET_NULL, null=True,
-        related_name='mouvements_tresorerie_crees', verbose_name="Créé par")
+        related_name='mouvements_tresorerie_crees', verbose_name="Créé par"
+    )
     valide_par = models.ForeignKey(
         CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='mouvements_tresorerie_valides', verbose_name="Validé par")
+        related_name='mouvements_tresorerie_valides', verbose_name="Validé par"
+    )
     date_validation = models.DateTimeField(
-        null=True, blank=True, verbose_name="Date validation")
+        null=True, blank=True, verbose_name="Date validation"
+    )
 
     class Meta:
         verbose_name = "Mouvement de trésorerie"
         verbose_name_plural = "Mouvements de trésorerie"
         ordering = ['-date_mouvement']
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['type_mouvement', 'date_mouvement']),
-            models.Index(fields=['agence', 'status']),
-            models.Index(fields=['caisse', 'date_mouvement']),
-            models.Index(fields=['compte_bancaire', 'date_mouvement']),
+            models.Index(fields=['reference'], name='mvt_reference_idx'),
+            models.Index(fields=['type_mouvement',
+                         'date_mouvement'], name='mvt_type_date_idx'),
+            models.Index(fields=['agence', 'status'],
+                         name='mvt_agence_status_idx'),
+            models.Index(fields=['caisse', 'date_mouvement'],
+                         name='mvt_caisse_date_idx'),
+            models.Index(
+                fields=['compte_bancaire', 'date_mouvement'], name='mvt_compte_date_idx'),
+            models.Index(fields=['-date_mouvement'], name='mvt_date_desc_idx'),
+            models.Index(fields=['source_type', 'source_id'],
+                         name='mvt_source_idx'),
+            models.Index(fields=['status', 'date_mouvement'],
+                         name='mvt_status_date_idx'),
         ]
 
     def __str__(self):
         return f"{self.reference} - {self.type_mouvement} - {self.montant:,.0f} GNF"
 
     def save(self, *args, **kwargs):
-        # ✅ Génération automatique de la référence
         if not self.reference:
             from datetime import datetime
-            prefix = f"TRES{datetime.now().strftime('%Y%m')}"
             if self.type_mouvement == 'encaissement':
                 prefix = f"ENC{datetime.now().strftime('%Y%m')}"
             elif self.type_mouvement == 'decaissement':
@@ -346,7 +378,9 @@ class MouvementTresorerie(models.Model):
                 prefix = f"TRF{datetime.now().strftime('%Y%m')}"
 
             last = MouvementTresorerie.objects.filter(
-                reference__startswith=prefix).order_by('-id').first()
+                reference__startswith=prefix
+            ).order_by('-id').first()
+
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -356,25 +390,20 @@ class MouvementTresorerie(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
-        # ✅ Vérifier qu'on a une destination
         if not self.caisse and not self.compte_bancaire:
             raise ValidationError(
                 "Un mouvement doit avoir une caisse ou un compte bancaire"
             )
 
-        # ✅ Mettre à jour les soldes si le mouvement est effectué
         if self.status == 'effectue':
             if not self.pk:
-                # Nouveau mouvement
                 self._mettre_a_jour_soldes()
             else:
-                # Mouvement existant - vérifier si le statut a changé
                 try:
                     old = MouvementTresorerie.objects.get(pk=self.pk)
                     if old.status != 'effectue' and self.status == 'effectue':
                         self._mettre_a_jour_soldes()
                     elif old.status == 'effectue' and self.status != 'effectue':
-                        # Inverser les soldes si on passe de effectue à autre chose
                         self._inverser_soldes()
                 except MouvementTresorerie.DoesNotExist:
                     pass
@@ -419,7 +448,8 @@ class MouvementTresorerie(models.Model):
             logger = logging.getLogger(__name__)
             logger.error(f"❌ Erreur mise à jour soldes: {str(e)}")
             raise ValidationError(
-                f"Erreur lors de la mise à jour des soldes: {str(e)}")
+                f"Erreur lors de la mise à jour des soldes: {str(e)}"
+            )
 
     def _inverser_soldes(self):
         """
@@ -450,11 +480,11 @@ class MouvementTresorerie(models.Model):
     @property
     def est_transfert(self):
         return self.type_mouvement == 'transfert'
+
+
 # ============================================================
 # 4. FRAIS ET DÉPENSES
 # ============================================================
-
-
 class Frais(models.Model):
     """
     Frais et dépenses diverses
@@ -488,74 +518,90 @@ class Frais(models.Model):
         max_length=50, unique=True, verbose_name="Référence")
     titre = models.CharField(max_length=200, verbose_name="Titre")
 
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='frais',
-                               verbose_name="Agence")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='frais', verbose_name="Agence"
+    )
 
     categorie = models.CharField(
-        max_length=20, choices=CATEGORIE_FRAIS, verbose_name="Catégorie")
-    montant = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)],
-                                  verbose_name="Montant")
+        max_length=20, choices=CATEGORIE_FRAIS, verbose_name="Catégorie"
+    )
+    montant = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        validators=[MinValueValidator(0)], verbose_name="Montant"
+    )
 
     date_frais = models.DateField(
         default=timezone.now, verbose_name="Date du frais")
     date_paiement = models.DateField(
-        null=True, blank=True, verbose_name="Date de paiement")
+        null=True, blank=True, verbose_name="Date de paiement"
+    )
 
     beneficiaire = models.CharField(
         max_length=200, verbose_name="Bénéficiaire")
 
-    piece_justificative = models.CharField(max_length=50, blank=True, null=True,
-                                           verbose_name="Pièce justificative")
+    piece_justificative = models.CharField(
+        max_length=50, blank=True, null=True, verbose_name="Pièce justificative"
+    )
 
-    mode_paiement = models.CharField(max_length=20, choices=MouvementTresorerie.MODE_PAIEMENT,
-                                     default='especes', verbose_name="Mode de paiement")
+    mode_paiement = models.CharField(
+        max_length=20, choices=MouvementTresorerie.MODE_PAIEMENT,
+        default='especes', verbose_name="Mode de paiement"
+    )
 
     # ============================================================
-    # DESTINATION DU DÉCAISSEMENT (NOUVEAU)
+    # DESTINATION DU DÉCAISSEMENT
     # ============================================================
     caisse_destination = models.ForeignKey(
-        'Caisse',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='frais_sortants',
-        verbose_name="Caisse de décaissement"
+        'Caisse', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='frais_sortants', verbose_name="Caisse de décaissement"
     )
     compte_destination = models.ForeignKey(
-        'CompteBancaire',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='frais_sortants',
-        verbose_name="Compte bancaire de décaissement"
+        'CompteBancaire', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='frais_sortants', verbose_name="Compte bancaire de décaissement"
     )
 
     mouvement = models.ForeignKey(
-        MouvementTresorerie,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='frais_associes',
+        MouvementTresorerie, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='frais_associes',
         verbose_name="Mouvement associé"
     )
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='brouillon',
-                              verbose_name="Statut")
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='brouillon',
+        verbose_name="Statut"
+    )
 
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                   related_name='frais_crees', verbose_name="Créé par")
-    valide_par = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='frais_valides', verbose_name="Validé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='frais_crees', verbose_name="Créé par"
+    )
+    valide_par = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='frais_valides', verbose_name="Validé par"
+    )
     date_validation = models.DateTimeField(
-        null=True, blank=True, verbose_name="Date validation")
+        null=True, blank=True, verbose_name="Date validation"
+    )
 
     class Meta:
         verbose_name = "Frais"
         verbose_name_plural = "Frais"
         ordering = ['-date_frais']
+        indexes = [
+            models.Index(fields=['agence', 'status'],
+                         name='frais_agence_status_idx'),
+            models.Index(fields=['categorie'], name='frais_categorie_idx'),
+            models.Index(fields=['-date_frais'], name='frais_date_desc_idx'),
+            models.Index(fields=['-created_at'], name='frais_created_idx'),
+            models.Index(fields=['caisse_destination'],
+                         name='frais_caisse_idx'),
+            models.Index(fields=['compte_destination'],
+                         name='frais_compte_idx'),
+        ]
 
     def __str__(self):
         return f"{self.reference} - {self.titre} ({self.montant:,.0f} GNF)"
@@ -565,7 +611,9 @@ class Frais(models.Model):
             from datetime import datetime
             prefix = f"FRAIS{datetime.now().strftime('%Y%m')}"
             last = Frais.objects.filter(
-                reference__startswith=prefix).order_by('-id').first()
+                reference__startswith=prefix
+            ).order_by('-id').first()
+
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -577,15 +625,13 @@ class Frais(models.Model):
 
         # ✅ Création du mouvement si le frais est payé et qu'il n'y en a pas encore
         if self.status == 'paye' and not self.mouvement:
-            # Déterminer la destination
             caisse = self.caisse_destination
             compte = self.compte_destination
 
-            # Fallback : caisse par défaut si aucune destination choisie
             if not caisse and not compte:
                 caisse = Caisse.objects.filter(
                     agence=self.agence,
-                    is_default=True
+                    is_default=True,
                 ).first()
                 if not caisse:
                     raise ValidationError(
@@ -593,10 +639,6 @@ class Frais(models.Model):
                         "Veuillez choisir une destination."
                     )
 
-            # Créer le mouvement de décaissement
-            # La méthode save() de MouvementTresorerie gère automatiquement
-            # la mise à jour des soldes (puisque status='effectue' et pk is None).
-            # On n'appelle PAS _mettre_a_jour_soldes() ni save() manuellement.
             mouvement = MouvementTresorerie.objects.create(
                 type_mouvement='decaissement',
                 agence=self.agence,
@@ -611,18 +653,16 @@ class Frais(models.Model):
                 date_valeur=self.date_paiement or timezone.now().date(),
                 status='effectue',
                 libelle=f"Frais: {self.titre}",
-                created_by=self.created_by
+                created_by=self.created_by,
             )
-            # Le mouvement est déjà sauvegardé et a mis à jour le solde.
             self.mouvement = mouvement
 
         super().save(*args, **kwargs)
 
+
 # ============================================================
 # 5. PRÉVISIONS DE TRÉSORERIE
 # ============================================================
-
-
 class PrevisionTresorerie(models.Model):
     """
     Prévision de trésorerie
@@ -653,57 +693,83 @@ class PrevisionTresorerie(models.Model):
         max_length=50, unique=True, verbose_name="Référence")
     titre = models.CharField(max_length=200, verbose_name="Titre")
 
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='previsions_tresorerie',
-                               verbose_name="Agence")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='previsions_tresorerie', verbose_name="Agence"
+    )
 
     type_prevision = models.CharField(
-        max_length=20, choices=TYPE_PREVISION, verbose_name="Type de prévision")
-    periode = models.CharField(max_length=20, choices=PERIODE_CHOICES, default='mensuel',
-                               verbose_name="Période")
+        max_length=20, choices=TYPE_PREVISION, verbose_name="Type de prévision"
+    )
+    periode = models.CharField(
+        max_length=20, choices=PERIODE_CHOICES, default='mensuel',
+        verbose_name="Période"
+    )
 
-    montant_prevu = models.DecimalField(max_digits=15, decimal_places=2,
-                                        validators=[MinValueValidator(0)],
-                                        verbose_name="Montant prévu")
-    montant_reel = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                       verbose_name="Montant réel")
+    montant_prevu = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        validators=[MinValueValidator(0)], verbose_name="Montant prévu"
+    )
+    montant_reel = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Montant réel"
+    )
 
     date_debut = models.DateField(verbose_name="Date début")
     date_fin = models.DateField(verbose_name="Date fin")
 
-    # Source
     source_type = models.CharField(
-        max_length=50, blank=True, null=True, verbose_name="Type source")
+        max_length=50, blank=True, null=True, verbose_name="Type source"
+    )
     source_id = models.IntegerField(
         null=True, blank=True, verbose_name="ID source")
 
-    # Catégorie
     categorie = models.CharField(
-        max_length=50, blank=True, null=True, verbose_name="Catégorie")
+        max_length=50, blank=True, null=True, verbose_name="Catégorie"
+    )
     sous_categorie = models.CharField(
-        max_length=50, blank=True, null=True, verbose_name="Sous-catégorie")
+        max_length=50, blank=True, null=True, verbose_name="Sous-catégorie"
+    )
 
-    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default='brouillon',
-                              verbose_name="Statut")
+    statut = models.CharField(
+        max_length=20, choices=STATUT_CHOICES, default='brouillon',
+        verbose_name="Statut"
+    )
 
-    probabilite = models.IntegerField(default=50, validators=[MinValueValidator(0), MaxValueValidator(100)],
-                                      verbose_name="Probabilité (%)")
+    probabilite = models.IntegerField(
+        default=50,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        verbose_name="Probabilité (%)"
+    )
 
-    # Écart
     ecart = models.DecimalField(
-        max_digits=15, decimal_places=2, default=0, verbose_name="Écart")
-    pourcentage_ecart = models.DecimalField(max_digits=10, decimal_places=2, default=0,
-                                            verbose_name="Pourcentage d'écart")
+        max_digits=15, decimal_places=2, default=0, verbose_name="Écart"
+    )
+    pourcentage_ecart = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0,
+        verbose_name="Pourcentage d'écart"
+    )
 
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                   related_name='previsions_crees', verbose_name="Créé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='previsions_crees', verbose_name="Créé par"
+    )
 
     class Meta:
         verbose_name = "Prévision de trésorerie"
         verbose_name_plural = "Prévisions de trésorerie"
         ordering = ['-date_debut']
+        indexes = [
+            models.Index(fields=['agence', 'statut'],
+                         name='prev_agence_statut_idx'),
+            models.Index(fields=['type_prevision', 'statut'],
+                         name='prev_type_statut_idx'),
+            models.Index(fields=['date_debut', 'date_fin'],
+                         name='prev_dates_idx'),
+        ]
 
     def __str__(self):
         return f"{self.reference} - {self.titre} ({self.montant_prevu:,.0f} GNF)"
@@ -713,7 +779,9 @@ class PrevisionTresorerie(models.Model):
             from datetime import datetime
             prefix = f"PREV{datetime.now().strftime('%Y%m')}"
             last = PrevisionTresorerie.objects.filter(
-                reference__startswith=prefix).order_by('-id').first()
+                reference__startswith=prefix
+            ).order_by('-id').first()
+
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -723,7 +791,6 @@ class PrevisionTresorerie(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
-        # Calculer l'écart
         self.ecart = self.montant_reel - self.montant_prevu
         if self.montant_prevu > 0:
             self.pourcentage_ecart = (self.ecart / self.montant_prevu) * 100
@@ -734,7 +801,6 @@ class PrevisionTresorerie(models.Model):
 # ============================================================
 # 6. RAPPROCHEMENT BANCAIRE
 # ============================================================
-
 class RapprochementBancaire(models.Model):
     """
     Rapprochement bancaire
@@ -750,51 +816,84 @@ class RapprochementBancaire(models.Model):
     reference = models.CharField(
         max_length=50, unique=True, verbose_name="Référence")
 
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='rapprochements',
-                               verbose_name="Agence")
-    compte_bancaire = models.ForeignKey(CompteBancaire, on_delete=models.PROTECT,
-                                        related_name='rapprochements', verbose_name="Compte bancaire")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='rapprochements', verbose_name="Agence"
+    )
+    compte_bancaire = models.ForeignKey(
+        CompteBancaire, on_delete=models.PROTECT,
+        related_name='rapprochements', verbose_name="Compte bancaire"
+    )
 
     date_debut = models.DateField(verbose_name="Date début")
     date_fin = models.DateField(verbose_name="Date fin")
 
-    solde_comptable = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                          verbose_name="Solde comptable")
-    solde_bancaire = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                         verbose_name="Solde bancaire")
-    solde_rapproche = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                          verbose_name="Solde rapproché")
-    ecart = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                verbose_name="Écart")
+    solde_comptable = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde comptable"
+    )
+    solde_bancaire = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde bancaire"
+    )
+    solde_rapproche = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde rapproché"
+    )
+    ecart = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Écart"
+    )
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='brouillon',
-                              verbose_name="Statut")
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='brouillon',
+        verbose_name="Statut"
+    )
 
-    # Éléments de rapprochement
-    encours_emission = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                           verbose_name="En-cours d'émission")
-    encours_encaissement = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                               verbose_name="En-cours d'encaissement")
-    commissions = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                      verbose_name="Commissions bancaires")
-    autres_ecarts = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                        verbose_name="Autres écarts")
+    encours_emission = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="En-cours d'émission"
+    )
+    encours_encaissement = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="En-cours d'encaissement"
+    )
+    commissions = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Commissions bancaires"
+    )
+    autres_ecarts = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Autres écarts"
+    )
 
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                   related_name='rapprochements_crees', verbose_name="Créé par")
-    valide_par = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='rapprochements_valides', verbose_name="Validé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='rapprochements_crees', verbose_name="Créé par"
+    )
+    valide_par = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='rapprochements_valides', verbose_name="Validé par"
+    )
     date_validation = models.DateTimeField(
-        null=True, blank=True, verbose_name="Date validation")
+        null=True, blank=True, verbose_name="Date validation"
+    )
 
     class Meta:
         verbose_name = "Rapprochement bancaire"
         verbose_name_plural = "Rapprochements bancaires"
         ordering = ['-date_fin']
         unique_together = ['compte_bancaire', 'date_debut', 'date_fin']
+        indexes = [
+            models.Index(fields=['compte_bancaire',
+                         'date_fin'], name='rap_compte_date_idx'),
+            models.Index(fields=['status'], name='rap_status_idx'),
+            models.Index(fields=['agence', 'status'],
+                         name='rap_agence_status_idx'),
+        ]
 
     def __str__(self):
         return f"{self.reference} - {self.compte_bancaire.banque} ({self.date_debut} au {self.date_fin})"
@@ -804,7 +903,9 @@ class RapprochementBancaire(models.Model):
             from datetime import datetime
             prefix = f"RAP{datetime.now().strftime('%Y%m')}"
             last = RapprochementBancaire.objects.filter(
-                reference__startswith=prefix).order_by('-id').first()
+                reference__startswith=prefix
+            ).order_by('-id').first()
+
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -814,10 +915,14 @@ class RapprochementBancaire(models.Model):
             else:
                 self.reference = f"{prefix}0001"
 
-        # Calculer l'écart
         self.ecart = self.solde_comptable - self.solde_bancaire
-        self.solde_rapproche = self.solde_comptable - self.encours_emission + \
-            self.encours_encaissement - self.commissions - self.autres_ecarts
+        self.solde_rapproche = (
+            self.solde_comptable
+            - self.encours_emission
+            + self.encours_encaissement
+            - self.commissions
+            - self.autres_ecarts
+        )
 
         super().save(*args, **kwargs)
 
@@ -829,45 +934,64 @@ class RapprochementBancaire(models.Model):
 # ============================================================
 # 7. TRÉSORERIE JOURNALIÈRE
 # ============================================================
-
 class TresorerieJournaliere(models.Model):
     """
     Suivi journalier de la trésorerie
     """
     date = models.DateField(unique=True, verbose_name="Date")
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='tresorerie_journaliere',
-                               verbose_name="Agence")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT,
+        related_name='tresorerie_journaliere', verbose_name="Agence"
+    )
 
-    # Soldes
-    solde_ouverture = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                          verbose_name="Solde d'ouverture")
-    solde_fermeture = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                          verbose_name="Solde de fermeture")
+    solde_ouverture = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde d'ouverture"
+    )
+    solde_fermeture = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Solde de fermeture"
+    )
 
-    # Entrées/Sorties
-    total_entrees = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                        verbose_name="Total entrées")
-    total_sorties = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                        verbose_name="Total sorties")
+    total_entrees = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total entrées"
+    )
+    total_sorties = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total sorties"
+    )
 
-    # Détails par source
-    entrees_ventes = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                         verbose_name="Entrées ventes")
-    entrees_reglements = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                             verbose_name="Entrées règlements")
-    entrees_autres = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                         verbose_name="Entrées autres")
+    entrees_ventes = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Entrées ventes"
+    )
+    entrees_reglements = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Entrées règlements"
+    )
+    entrees_autres = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Entrées autres"
+    )
 
-    sorties_achats = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                         verbose_name="Sorties achats")
-    sorties_frais = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                        verbose_name="Sorties frais")
-    sorties_salaires = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                           verbose_name="Sorties salaires")
-    sorties_autres = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                         verbose_name="Sorties autres")
+    sorties_achats = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties achats"
+    )
+    sorties_frais = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties frais"
+    )
+    sorties_salaires = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties salaires"
+    )
+    sorties_autres = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Sorties autres"
+    )
 
-    # Métriques
     nb_operations = models.IntegerField(
         default=0, verbose_name="Nombre d'opérations")
     nb_entrees = models.IntegerField(
@@ -883,6 +1007,10 @@ class TresorerieJournaliere(models.Model):
         verbose_name_plural = "Trésoreries journalières"
         ordering = ['-date']
         unique_together = ['date', 'agence']
+        indexes = [
+            models.Index(fields=['agence', 'date'], name='tj_agence_date_idx'),
+            models.Index(fields=['-date'], name='tj_date_desc_idx'),
+        ]
 
     def __str__(self):
         return f"{self.date} - {self.agence.nom}"
