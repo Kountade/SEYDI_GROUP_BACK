@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from django.db.models import Q, Sum, Count, F
 from django.core.cache import cache
 from django.utils import timezone
+from datetime import datetime, timedelta
 
 from .models import *
 from .serializers import *
@@ -21,13 +22,33 @@ from users.permissions import IsPDG, IsDRH, IsPDGOrDRH, IsChefAgence, IsComptabl
 
 
 # ============================================================
-# CACHE
+# CACHE — Purge ROBUSTE
 # ============================================================
 def _purge_tresorerie_cache():
+    """
+    ✅ Purge le cache trésorerie après mutation.
+    - Redis       : delete_pattern → sélectif
+    - LocMemCache : clear() → global (fallback)
+    """
     try:
         cache.delete_pattern('tresorerie_*')
-    except Exception:
+    except AttributeError:
         cache.clear()
+    except Exception:
+        pass
+
+
+# ============================================================
+# HELPER — parsing dates robuste
+# ============================================================
+def _parse_date(value):
+    """Parse 'YYYY-MM-DD' → date, ou None."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None
 
 
 # ============================================================
@@ -62,16 +83,29 @@ class TresorerieGlobalView(APIView):
         solde_banques = comptes_agg['solde'] or 0
 
         data = {
-            'solde_global': solde_caisses + solde_banques,
-            'solde_caisses': solde_caisses,
-            'solde_banques': solde_banques,
+            'solde_global': float(solde_caisses + solde_banques),
+            'solde_caisses': float(solde_caisses),
+            'solde_banques': float(solde_banques),
             'nb_caisses': caisses_agg['count'] or 0,
             'nb_comptes': comptes_agg['count'] or 0,
         }
 
         cache.set(cache_key, data, 60)
-        serializer = TresorerieGlobalSerializer(data)
-        return Response(serializer.data)
+        return Response(data)
+
+
+# ============================================================
+# ✅ ALIAS /tresorerie/ → /tresorerie/global/
+# ============================================================
+class TresorerieDashboardView(APIView):
+    """
+    ✅ Alias pour /tresorerie/?agence_id=2
+    Renvoie le résumé global (caisses + banques).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        return TresorerieGlobalView().get(request)
 
 
 # ============================================================
@@ -145,8 +179,10 @@ class AlertesTresorerieView(APIView):
 # CAISSE VIEWSET
 # ============================================================
 class CaisseViewset(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated,
-                          IsPDGOrDRH | IsChefAgence | IsComptable]
+    permission_classes = [
+        permissions.IsAuthenticated,
+        IsPDGOrDRH | IsChefAgence | IsComptable,
+    ]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['code', 'nom', 'description']
     ordering_fields = ['code', 'nom', 'solde_actuel']
@@ -175,7 +211,8 @@ class CaisseViewset(viewsets.ModelViewSet):
             agences_ids = user.get_agences().values_list('id', flat=True)
             qs = qs.filter(agence_id__in=agences_ids)
 
-        return qs.filter(is_active=True)
+        # ✅ FIX : tri stable pour la pagination
+        return qs.filter(is_active=True).order_by('code', 'id')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -197,7 +234,7 @@ class CaisseViewset(viewsets.ModelViewSet):
             caisse.mouvements
             .filter(status='effectue')
             .select_related('agence', 'caisse', 'compte_bancaire', 'created_by', 'valide_par')
-            .order_by('-date_mouvement')
+            .order_by('-date_mouvement', '-id')
         )
         page = self.paginate_queryset(qs)
         if page is not None:
@@ -211,8 +248,10 @@ class CaisseViewset(viewsets.ModelViewSet):
 # COMPTE BANCAIRE VIEWSET
 # ============================================================
 class CompteBancaireViewset(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated,
-                          IsPDGOrDRH | IsChefAgence | IsComptable]
+    permission_classes = [
+        permissions.IsAuthenticated,
+        IsPDGOrDRH | IsChefAgence | IsComptable,
+    ]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['banque', 'nom', 'numero_compte', 'code']
     ordering_fields = ['banque', 'nom', 'solde_actuel']
@@ -231,7 +270,8 @@ class CompteBancaireViewset(viewsets.ModelViewSet):
             agences_ids = user.get_agences().values_list('id', flat=True)
             qs = qs.filter(agence_id__in=agences_ids)
 
-        return qs.filter(is_active=True)
+        # ✅ FIX : tri stable
+        return qs.filter(is_active=True).order_by('banque', 'code', 'id')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -253,7 +293,7 @@ class CompteBancaireViewset(viewsets.ModelViewSet):
             compte.mouvements
             .filter(status='effectue')
             .select_related('agence', 'caisse', 'compte_bancaire', 'created_by', 'valide_par')
-            .order_by('-date_mouvement')
+            .order_by('-date_mouvement', '-id')
         )
         page = self.paginate_queryset(qs)
         if page is not None:
@@ -267,8 +307,10 @@ class CompteBancaireViewset(viewsets.ModelViewSet):
 # MOUVEMENT DE TRÉSORERIE VIEWSET
 # ============================================================
 class MouvementTresorerieViewset(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated,
-                          IsPDGOrDRH | IsChefAgence | IsComptable]
+    permission_classes = [
+        permissions.IsAuthenticated,
+        IsPDGOrDRH | IsChefAgence | IsComptable,
+    ]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['reference', 'libelle', 'source_reference']
     ordering_fields = ['date_mouvement', 'montant', 'created_at']
@@ -283,8 +325,10 @@ class MouvementTresorerieViewset(viewsets.ModelViewSet):
         user = self.request.user
         qs = (
             MouvementTresorerie.objects
-            .select_related('agence', 'caisse', 'compte_bancaire',
-                            'created_by', 'valide_par', 'ecriture')
+            .select_related(
+                'agence', 'caisse', 'compte_bancaire',
+                'created_by', 'valide_par', 'ecriture',
+            )
         )
 
         if not (user.est_pdg() or user.est_drh()):
@@ -301,15 +345,18 @@ class MouvementTresorerieViewset(viewsets.ModelViewSet):
         if s:
             qs = qs.filter(status=s)
 
-        date_debut = params.get('date_debut')
+        # ✅ FIX : __gte / __lt sur DateTimeField (index-friendly)
+        date_debut = _parse_date(params.get('date_debut'))
         if date_debut:
-            qs = qs.filter(date_mouvement__date__gte=date_debut)
+            qs = qs.filter(date_mouvement__gte=date_debut)
 
-        date_fin = params.get('date_fin')
+        date_fin = _parse_date(params.get('date_fin'))
         if date_fin:
-            qs = qs.filter(date_mouvement__date__lte=date_fin)
+            # borne fin de journée exclusive (lendemain)
+            qs = qs.filter(date_mouvement__lt=date_fin + timedelta(days=1))
 
-        return qs
+        # ✅ FIX : tri stable
+        return qs.order_by('-date_mouvement', '-id')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -331,8 +378,7 @@ class MouvementTresorerieViewset(viewsets.ModelViewSet):
         mouvement.status = 'effectue'
         mouvement.valide_par = request.user
         mouvement.date_validation = timezone.now()
-        # ✅ La méthode save() du modèle gère les soldes → pas d'appel manuel
-        mouvement.save()
+        mouvement.save()  # ✅ save() gère les soldes
         _purge_tresorerie_cache()
 
         return Response(self.get_serializer(mouvement).data)
@@ -340,20 +386,50 @@ class MouvementTresorerieViewset(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def annuler(self, request, pk=None):
         mouvement = self.get_object()
-        # ✅ La méthode save() gère l'inversion si ancien=effectue → nouveau!=effectue
         mouvement.status = 'annule'
-        mouvement.save()
+        mouvement.save()  # ✅ save() gère l'inversion
         _purge_tresorerie_cache()
 
         return Response(self.get_serializer(mouvement).data)
+
+    # ✅ STATS mouvements
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        qs = self.get_queryset()
+
+        agg = qs.aggregate(
+            total=Count('id'),
+            encaissements=Sum('montant', filter=Q(
+                type_mouvement='encaissement')),
+            decaissements=Sum('montant', filter=Q(
+                type_mouvement='decaissement')),
+            transferts=Sum('montant', filter=Q(type_mouvement='transfert')),
+            effectues=Count('id', filter=Q(status='effectue')),
+            planifies=Count('id', filter=Q(status='planifie')),
+        )
+
+        enc = agg['encaissements'] or 0
+        dec = agg['decaissements'] or 0
+
+        return Response({
+            'total': agg['total'] or 0,
+            'encaissements': float(enc),
+            'decaissements': float(dec),
+            'transferts': float(agg['transferts'] or 0),
+            'solde': float(enc - dec),
+            'effectues': agg['effectues'] or 0,
+            'planifies': agg['planifies'] or 0,
+        })
 
 
 # ============================================================
 # FRAIS VIEWSET
 # ============================================================
 class FraisViewset(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated,
-                          IsPDGOrDRH | IsChefAgence | IsComptable]
+    permission_classes = [
+        permissions.IsAuthenticated,
+        IsPDGOrDRH | IsChefAgence | IsComptable,
+    ]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['reference', 'titre', 'beneficiaire']
     ordering_fields = ['date_frais', 'montant', 'created_at']
@@ -388,7 +464,8 @@ class FraisViewset(viewsets.ModelViewSet):
         if c:
             qs = qs.filter(categorie=c)
 
-        return qs
+        # ✅ FIX : tri stable
+        return qs.order_by('-date_frais', '-id')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -423,18 +500,44 @@ class FraisViewset(viewsets.ModelViewSet):
             )
         frais.status = 'paye'
         frais.date_paiement = timezone.now().date()
-        # ✅ Le save() du modèle crée le mouvement de trésorerie associé
-        frais.save()
+        frais.save()  # ✅ crée le mouvement associé
         _purge_tresorerie_cache()
         return Response(self.get_serializer(frais).data)
+
+    # ✅ STATS frais
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        qs = self.get_queryset()
+
+        agg = qs.aggregate(
+            total=Count('id'),
+            montant_total=Sum('montant'),
+            brouillon=Count('id', filter=Q(status='brouillon')),
+            en_attente=Count('id', filter=Q(status='en_attente')),
+            valide=Count('id', filter=Q(status='valide')),
+            paye=Count('id', filter=Q(status='paye')),
+            refuse=Count('id', filter=Q(status='refuse')),
+        )
+
+        return Response({
+            'total': agg['total'] or 0,
+            'montantTotal': float(agg['montant_total'] or 0),
+            'brouillon': agg['brouillon'] or 0,
+            'en_attente': agg['en_attente'] or 0,
+            'valide': agg['valide'] or 0,
+            'paye': agg['paye'] or 0,
+            'refuse': agg['refuse'] or 0,
+        })
 
 
 # ============================================================
 # PRÉVISIONS VIEWSET
 # ============================================================
 class PrevisionTresorerieViewset(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated,
-                          IsPDGOrDRH | IsChefAgence | IsComptable]
+    permission_classes = [
+        permissions.IsAuthenticated,
+        IsPDGOrDRH | IsChefAgence | IsComptable,
+    ]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['reference', 'titre']
     ordering_fields = ['date_debut', 'montant_prevu', 'created_at']
@@ -463,7 +566,8 @@ class PrevisionTresorerieViewset(viewsets.ModelViewSet):
         if s:
             qs = qs.filter(statut=s)
 
-        return qs
+        # ✅ FIX : tri stable
+        return qs.order_by('-date_debut', '-id')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -505,7 +609,8 @@ class RapprochementBancaireViewset(viewsets.ModelViewSet):
         if s:
             qs = qs.filter(status=s)
 
-        return qs
+        # ✅ FIX : tri stable
+        return qs.order_by('-date_fin', '-id')
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -535,8 +640,10 @@ class RapprochementBancaireViewset(viewsets.ModelViewSet):
 # TRÉSORERIE JOURNALIÈRE VIEWSET
 # ============================================================
 class TresorerieJournaliereViewset(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [permissions.IsAuthenticated,
-                          IsPDGOrDRH | IsChefAgence | IsComptable]
+    permission_classes = [
+        permissions.IsAuthenticated,
+        IsPDGOrDRH | IsChefAgence | IsComptable,
+    ]
     serializer_class = TresorerieJournaliereSerializer
     filter_backends = [filters.OrderingFilter]
     ordering_fields = ['date']
@@ -552,12 +659,13 @@ class TresorerieJournaliereViewset(viewsets.ReadOnlyModelViewSet):
 
         params = self.request.query_params
 
-        date_debut = params.get('date_debut')
+        date_debut = _parse_date(params.get('date_debut'))
         if date_debut:
             qs = qs.filter(date__gte=date_debut)
 
-        date_fin = params.get('date_fin')
+        date_fin = _parse_date(params.get('date_fin'))
         if date_fin:
             qs = qs.filter(date__lte=date_fin)
 
-        return qs
+        # ✅ FIX : tri stable
+        return qs.order_by('-date')

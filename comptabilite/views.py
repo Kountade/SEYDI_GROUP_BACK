@@ -17,8 +17,10 @@ Views pour l'application Comptabilité / Finance.
 - Balance._generer_lignes : 3 requêtes au lieu de N
 
 ✅ PAGINATION sur TOUS les ViewSets
-✅ CACHE sur Dashboard
+✅ CACHE sur Dashboard (avec period)
 ✅ PARALLÉLISATION Dashboard (ThreadPoolExecutor)
+✅ SEARCH sur tous les ViewSets (y compris Reglement)
+✅ STATS sur Ecriture, Reglement, FactureComptable
 """
 
 from rest_framework import viewsets, permissions, status, filters
@@ -52,14 +54,22 @@ from users.permissions import (
 
 
 # ============================================================
-# CACHE — Purge
+# CACHE — Purge ROBUSTE (Redis + fallback)
 # ============================================================
 def _purge_compta_cache():
-    """Purge le cache comptabilité après mutation."""
+    """
+    ✅ Purge le cache comptabilité après mutation.
+    - Redis       : delete_pattern('compta_*') → sélectif
+    - LocMemCache : clear() → global (fallback)
+    """
     try:
         cache.delete_pattern('compta_*')
-    except Exception:
+        cache.delete_pattern('compta_dashboard:*')
+    except AttributeError:
+        # LocMemCache n'a pas delete_pattern
         cache.clear()
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -73,7 +83,8 @@ class PlanComptableViewset(viewsets.ModelViewSet):
     - select_related('parent', 'created_by')
     - annotate(sous_comptes_count=Count('sous_comptes', filter=...))
     """
-    permission_classes = [permissions.IsAuthenticated, IsPDGOrDRH | IsComptable]
+    permission_classes = [
+        permissions.IsAuthenticated, IsPDGOrDRH | IsComptable]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['code', 'nom', 'description']
     ordering_fields = ['code', 'nom', 'type_compte', 'niveau']
@@ -85,7 +96,6 @@ class PlanComptableViewset(viewsets.ModelViewSet):
         return PlanComptableSerializer
 
     def get_queryset(self):
-        # ✅ 1 requête : select_related + annotate
         queryset = (
             PlanComptable.objects
             .filter(is_active=True)
@@ -128,7 +138,6 @@ class PlanComptableViewset(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def soldes(self, request, pk=None):
-        """Récupère les soldes d'un compte (paginé)."""
         compte = self.get_object()
         agence_id = request.query_params.get('agence_id')
         if not agence_id:
@@ -153,7 +162,6 @@ class PlanComptableViewset(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def lignes_ecritures(self, request, pk=None):
-        """Récupère les lignes d'écriture d'un compte (paginé)."""
         compte = self.get_object()
         agence_id = request.query_params.get('agence_id')
         if not agence_id:
@@ -185,13 +193,6 @@ class PlanComptableViewset(viewsets.ModelViewSet):
 # JOURNAL VIEWSET
 # ============================================================
 class JournalViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour la gestion des journaux.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('agence')
-    - annotate(ecritures_count=Count('ecritures', filter=...))
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsChefAgence | IsComptable,
@@ -208,8 +209,6 @@ class JournalViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-
-        # ✅ 1 requête : select_related + annotate
         queryset = (
             Journal.objects
             .select_related('agence')
@@ -238,9 +237,7 @@ class JournalViewset(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def ecritures(self, request, pk=None):
-        """Récupère les écritures d'un journal (paginé + optimisé)."""
         journal = self.get_object()
-
         ecritures = (
             journal.ecritures
             .select_related('journal', 'agence', 'created_by', 'validated_by')
@@ -265,28 +262,22 @@ class JournalViewset(viewsets.ModelViewSet):
         page = self.paginate_queryset(ecritures)
         if page is not None:
             serializer = EcritureSerializer(
-                page, many=True, context={'request': request, 'today': timezone.now().date()}
+                page, many=True,
+                context={'request': request, 'today': timezone.now().date()}
             )
             return self.get_paginated_response(serializer.data)
 
         serializer = EcritureSerializer(
-            ecritures, many=True, context={'request': request, 'today': timezone.now().date()}
+            ecritures, many=True,
+            context={'request': request, 'today': timezone.now().date()}
         )
         return Response(serializer.data)
 
 
 # ============================================================
-# ÉCRITURES VIEWSET  (✅ LE PLUS CRITIQUE)
+# ÉCRITURES VIEWSET
 # ============================================================
 class EcritureViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour les écritures comptables.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('journal', 'agence', 'created_by', 'validated_by')
-    - prefetch_related(Prefetch('lignes', select_related('compte')))
-    - _mettre_a_jour_soldes : bulk_create + bulk_update
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsChefAgence | IsComptable,
@@ -303,10 +294,6 @@ class EcritureViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-
-        # ✅ LA CORRECTION CRUCIALE :
-        # - select_related : journal, agence, created_by, validated_by
-        # - prefetch_related : lignes + compte
         queryset = (
             Ecriture.objects
             .select_related('journal', 'agence', 'created_by', 'validated_by')
@@ -320,7 +307,6 @@ class EcritureViewset(viewsets.ModelViewSet):
             agences_ids = user.get_agences().values_list('id', flat=True)
             queryset = queryset.filter(agence_id__in=agences_ids)
 
-        # ✅ Filtres index-friendly
         status_filter = self.request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
@@ -352,10 +338,35 @@ class EcritureViewset(viewsets.ModelViewSet):
         serializer.save()
         _purge_compta_cache()
 
+    # ✅ STATS (nouveau)
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        """Stats globales des écritures (respecte les filtres)."""
+        qs = self.get_queryset()
+
+        agg = qs.aggregate(
+            total=Count('id'),
+            total_debit=Sum('total_debit'),
+            total_credit=Sum('total_credit'),
+            brouillon=Count('id', filter=Q(status='brouillon')),
+            valide=Count('id', filter=Q(status='valide')),
+            annulee=Count('id', filter=Q(status='annulee')),
+            cloturee=Count('id', filter=Q(status='cloturee')),
+        )
+
+        return Response({
+            'total': agg['total'] or 0,
+            'brouillon': agg['brouillon'] or 0,
+            'valide': agg['valide'] or 0,
+            'annulee': agg['annulee'] or 0,
+            'cloturee': agg['cloturee'] or 0,
+            'totalDebit': float(agg['total_debit'] or 0),
+            'totalCredit': float(agg['total_credit'] or 0),
+        })
+
     @action(detail=True, methods=['post'])
     @transaction.atomic
     def valider(self, request, pk=None):
-        """Valide une écriture + met à jour les soldes (bulk)."""
         ecriture = self.get_object()
 
         if ecriture.status == 'valide':
@@ -379,7 +390,6 @@ class EcritureViewset(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def annuler(self, request, pk=None):
-        """Annule une écriture."""
         ecriture = self.get_object()
 
         if ecriture.status == 'annulee':
@@ -402,9 +412,6 @@ class EcritureViewset(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def _mettre_a_jour_soldes(self, ecriture):
-        """
-        ✅ Met à jour les soldes en BULK (2 requêtes au lieu de N × M).
-        """
         comptes_ids = [ligne.compte_id for ligne in ecriture.lignes.all()]
         soldes_existants = {
             s.compte_id: s
@@ -439,7 +446,6 @@ class EcritureViewset(viewsets.ModelViewSet):
                     credit_periode=ligne.credit,
                 ))
 
-        # ✅ 2 requêtes bulk au lieu de N get_or_create
         if soldes_a_creer:
             SoldeCompte.objects.bulk_create(soldes_a_creer)
         if soldes_a_mettre_a_jour:
@@ -453,15 +459,6 @@ class EcritureViewset(viewsets.ModelViewSet):
 # BALANCE VIEWSET
 # ============================================================
 class BalanceViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour les balances.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('agence', 'created_by')
-    - annotate(total_debit=Sum(...), total_credit=Sum(...))
-    - prefetch_related(Prefetch('lignes', select_related('compte')))
-    - _generer_lignes_balance : 3 requêtes + bulk_create
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsChefAgence | IsComptable,
@@ -475,8 +472,6 @@ class BalanceViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-
-        # ✅ 1 requête : select_related + annotate + prefetch
         queryset = (
             Balance.objects
             .select_related('agence', 'created_by')
@@ -512,7 +507,6 @@ class BalanceViewset(viewsets.ModelViewSet):
             self._generer_lignes_balance(balance)
             _purge_compta_cache()
 
-            # Recharger avec annotate
             balance = self.get_queryset().get(pk=balance.pk)
             return Response(
                 BalanceSerializer(balance).data,
@@ -521,17 +515,8 @@ class BalanceViewset(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def _generer_lignes_balance(self, balance):
-        """
-        ✅ 3 requêtes au lieu de N × 2 :
-        - 1 pour les comptes
-        - 1 pour les soldes initiaux
-        - 1 pour les mouvements
-        - 1 bulk_create
-        """
-        # ✅ 1 requête : tous les comptes actifs
         comptes = list(PlanComptable.objects.filter(is_active=True))
 
-        # ✅ 1 requête : soldes initiaux (avant date_debut)
         soldes_initiaux_qs = (
             SoldeCompte.objects
             .filter(
@@ -546,7 +531,6 @@ class BalanceViewset(viewsets.ModelViewSet):
         )
         soldes_initiaux = {s['compte_id']: s for s in soldes_initiaux_qs}
 
-        # ✅ 1 requête : mouvements de la période
         mouvements_qs = (
             SoldeCompte.objects
             .filter(
@@ -562,7 +546,6 @@ class BalanceViewset(viewsets.ModelViewSet):
         )
         mouvements = {m['compte_id']: m for m in mouvements_qs}
 
-        # ✅ 1 bulk_create
         lignes = []
         for compte in comptes:
             si = soldes_initiaux.get(compte.id, {'debit': 0, 'credit': 0})
@@ -585,13 +568,6 @@ class BalanceViewset(viewsets.ModelViewSet):
 # FACTURES COMPTABLES VIEWSET
 # ============================================================
 class FactureComptableViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour les factures comptables.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('agence', 'client', 'fournisseur', 'created_by')
-    - serializer utilise 'today' du contexte pour jours_retard
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsChefAgence | IsComptable,
@@ -608,8 +584,6 @@ class FactureComptableViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-
-        # ✅ select_related pour client, fournisseur, agence
         queryset = (
             FactureComptable.objects
             .select_related(
@@ -638,7 +612,7 @@ class FactureComptableViewset(viewsets.ModelViewSet):
         if fournisseur_id:
             queryset = queryset.filter(fournisseur_id=fournisseur_id)
 
-        return queryset
+        return queryset.order_by('-date_facture', '-id')
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -653,18 +627,50 @@ class FactureComptableViewset(viewsets.ModelViewSet):
         serializer.save()
         _purge_compta_cache()
 
+    # ✅ STATS (nouveau)
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        """Stats globales des factures comptables."""
+        qs = self.get_queryset()
+
+        agg = qs.aggregate(
+            total=Count('id'),
+            client=Count('id', filter=Q(type_facture='client')),
+            fournisseur=Count('id', filter=Q(type_facture='fournisseur')),
+            brouillon=Count('id', filter=Q(status='brouillon')),
+            envoyee=Count('id', filter=Q(status='envoyee')),
+            recue=Count('id', filter=Q(status='recue')),
+            payee=Count('id', filter=Q(status='payee')),
+            partielle=Count('id', filter=Q(status='partielle')),
+            impayee=Count('id', filter=Q(status='impayee')),
+            annulee=Count('id', filter=Q(status='annulee')),
+            total_montant=Sum('montant_ttc'),
+        )
+
+        total_impaye = qs.filter(
+            status__in=['impayee', 'partielle']
+        ).aggregate(total=Sum('montant_restant'))['total'] or 0
+
+        return Response({
+            'total': agg['total'] or 0,
+            'client': agg['client'] or 0,
+            'fournisseur': agg['fournisseur'] or 0,
+            'brouillon': agg['brouillon'] or 0,
+            'envoyee': agg['envoyee'] or 0,
+            'recue': agg['recue'] or 0,
+            'payee': agg['payee'] or 0,
+            'partielle': agg['partielle'] or 0,
+            'impayee': agg['impayee'] or 0,
+            'annulee': agg['annulee'] or 0,
+            'totalMontant': float(agg['total_montant'] or 0),
+            'totalImpaye': float(total_impaye),
+        })
+
 
 # ============================================================
 # RÈGLEMENTS VIEWSET
 # ============================================================
 class ReglementViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour les règlements.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('facture') : CRUCIAL pour facture_reference
-    - select_related('client', 'fournisseur', 'agence', 'created_by')
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsChefAgence | IsComptable,
@@ -684,8 +690,6 @@ class ReglementViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-
-        # ✅ select_related('facture') : CRUCIAL
         queryset = (
             Reglement.objects
             .select_related(
@@ -714,7 +718,18 @@ class ReglementViewset(viewsets.ModelViewSet):
         if fournisseur_id:
             queryset = queryset.filter(fournisseur_id=fournisseur_id)
 
-        return queryset
+        # ✅ RECHERCHE (manquante)
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(reference__icontains=search) |
+                Q(client__nom__icontains=search) |
+                Q(fournisseur__company_name__icontains=search) |
+                Q(facture__reference__icontains=search) |
+                Q(reference_externe__icontains=search)
+            )
+
+        return queryset.order_by('-date_reglement', '-id')
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -731,7 +746,6 @@ class ReglementViewset(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def _mettre_a_jour_facture(self, facture):
-        """Met à jour le statut de la facture (SQL)."""
         total_paye = facture.reglements.aggregate(
             total=Sum('montant')
         )['total'] or 0
@@ -750,17 +764,45 @@ class ReglementViewset(viewsets.ModelViewSet):
             'montant_paye', 'montant_restant', 'status', 'updated_at',
         ])
 
+    # ✅ STATS (nouveau)
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        qs = self.get_queryset()
+
+        agg = qs.aggregate(
+            total=Count('id'),
+            client=Count('id', filter=Q(type_reglement='client')),
+            fournisseur=Count('id', filter=Q(type_reglement='fournisseur')),
+            especes=Count('id', filter=Q(mode_reglement='especes')),
+            virement=Count('id', filter=Q(mode_reglement='virement')),
+            carte=Count('id', filter=Q(mode_reglement='carte')),
+            cheque=Count('id', filter=Q(mode_reglement='cheque')),
+            mobile_money=Count('id', filter=Q(mode_reglement='mobile_money')),
+            total_montant=Sum('montant'),
+            total_client=Sum('montant', filter=Q(type_reglement='client')),
+            total_fournisseur=Sum('montant', filter=Q(
+                type_reglement='fournisseur')),
+        )
+
+        return Response({
+            'total': agg['total'] or 0,
+            'client': agg['client'] or 0,
+            'fournisseur': agg['fournisseur'] or 0,
+            'especes': agg['especes'] or 0,
+            'virement': agg['virement'] or 0,
+            'carte': agg['carte'] or 0,
+            'cheque': agg['cheque'] or 0,
+            'mobile_money': agg['mobile_money'] or 0,
+            'totalMontant': float(agg['total_montant'] or 0),
+            'totalClient': float(agg['total_client'] or 0),
+            'totalFournisseur': float(agg['total_fournisseur'] or 0),
+        })
+
 
 # ============================================================
 # INDICATEURS VIEWSET
 # ============================================================
 class IndicateurViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour les indicateurs financiers.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('agence')
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsChefAgence | IsComptable,
@@ -806,12 +848,6 @@ class IndicateurViewset(viewsets.ModelViewSet):
 # CLÔTURE VIEWSET
 # ============================================================
 class ClotureViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour les clôtures comptables.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('agence', 'created_by', 'closed_by')
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsComptable,
@@ -856,12 +892,6 @@ class ClotureViewset(viewsets.ModelViewSet):
 # ANALYSE VIEWSET
 # ============================================================
 class AnalyseViewset(viewsets.ModelViewSet):
-    """
-    ViewSet pour les analyses financières.
-
-    ✅ N+1 ÉLIMINÉ :
-    - select_related('agence', 'created_by')
-    """
     permission_classes = [
         permissions.IsAuthenticated,
         IsPDGOrDRH | IsChefAgence | IsComptable,
@@ -899,26 +929,33 @@ class AnalyseViewset(viewsets.ModelViewSet):
 
 
 # ============================================================
-# DASHBOARD (✅ CACHE + PARALLÉLISATION)
+# DASHBOARD (✅ period + CACHE + PARALLÉLISATION)
 # ============================================================
 class DashboardView(APIView):
     """
     Vue pour le tableau de bord financier.
 
-    ✅ CACHE 5 min + PARALLÉLISATION ThreadPoolExecutor
+    ✅ period = month | quarter | year (défaut: month)
+    ✅ CACHE 5 min (clé inclut period)
+    ✅ PARALLÉLISATION ThreadPoolExecutor
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         agence_id = request.query_params.get('agence_id')
+        period = request.query_params.get('period', 'month')
+
         if not agence_id:
             return Response(
                 {"error": "agence_id est requis"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # ✅ Cache 5 min
-        cache_key = f'compta_dashboard:{agence_id}'
+        if period not in ('month', 'quarter', 'year'):
+            period = 'month'
+
+        # ✅ Cache key inclut period
+        cache_key = f'compta_dashboard:{agence_id}:{period}'
         cached = cache.get(cache_key)
         if cached:
             return Response(cached)
@@ -937,18 +974,34 @@ class DashboardView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # ✅ today calculé UNE SEULE fois
         today = timezone.now().date()
-        debut_mois = today.replace(day=1)
-        mois_precedent = debut_mois - timedelta(days=1)
-        debut_mois_precedent = mois_precedent.replace(day=1)
+
+        # ✅ Bornes selon period
+        if period == 'month':
+            debut_periode = today.replace(day=1)
+            fin_periode_prec = debut_periode - timedelta(days=1)
+            debut_periode_prec = fin_periode_prec.replace(day=1)
+        elif period == 'quarter':
+            mois_debut_trimestre = ((today.month - 1) // 3) * 3 + 1
+            debut_periode = today.replace(
+                month=mois_debut_trimestre, day=1)
+            fin_periode_prec = debut_periode - timedelta(days=1)
+            mois_debut_trim_prec = (
+                (fin_periode_prec.month - 1) // 3) * 3 + 1
+            debut_periode_prec = fin_periode_prec.replace(
+                month=mois_debut_trim_prec, day=1)
+        else:  # year
+            debut_periode = today.replace(month=1, day=1)
+            debut_periode_prec = (debut_periode - timedelta(days=1)).replace(
+                month=1, day=1)
+            fin_periode_prec = debut_periode - timedelta(days=1)
 
         # ✅ Parallélisation
         with ThreadPoolExecutor(max_workers=6) as ex:
-            f_ca_mois = ex.submit(
+            f_ca = ex.submit(
                 lambda: FactureComptable.objects.filter(
                     agence=agence, type_facture='client',
-                    date_facture__gte=debut_mois,
+                    date_facture__gte=debut_periode,
                     date_facture__lte=today,
                     status__in=['payee', 'partielle'],
                 ).aggregate(total=Sum('montant_ttc'))['total'] or 0
@@ -956,15 +1009,15 @@ class DashboardView(APIView):
             f_ca_prev = ex.submit(
                 lambda: FactureComptable.objects.filter(
                     agence=agence, type_facture='client',
-                    date_facture__gte=debut_mois_precedent,
-                    date_facture__lte=mois_precedent,
+                    date_facture__gte=debut_periode_prec,
+                    date_facture__lte=fin_periode_prec,
                     status__in=['payee', 'partielle'],
                 ).aggregate(total=Sum('montant_ttc'))['total'] or 0
             )
             f_achats = ex.submit(
                 lambda: FactureComptable.objects.filter(
                     agence=agence, type_facture='fournisseur',
-                    date_facture__gte=debut_mois,
+                    date_facture__gte=debut_periode,
                     date_facture__lte=today,
                 ).aggregate(total=Sum('montant_ttc'))['total'] or 0
             )
@@ -992,9 +1045,9 @@ class DashboardView(APIView):
                 }
             )
 
-            ca_mois = f_ca_mois.result()
-            ca_mois_precedent = f_ca_prev.result()
-            achats_mois = f_achats.result()
+            ca = f_ca.result()
+            ca_prev = f_ca_prev.result()
+            achats = f_achats.result()
             encaissements = f_enc.result()
             decaissements = f_dec.result()
             alerts_data = f_alertes.result()
@@ -1022,27 +1075,25 @@ class DashboardView(APIView):
             })
 
         data = {
-            'periode': today.strftime('%B %Y'),
+            'periode': period,  # ✅ renvoie "month" | "quarter" | "year"
             'agence_id': agence.id,
-            'ca_total': float(ca_mois),
-            'ca_evolution': float(ca_mois - ca_mois_precedent),
+            'ca_total': float(ca),
+            'ca_evolution': float(ca - ca_prev),
             'ca_evolution_pourcentage': float(
-                ((ca_mois - ca_mois_precedent) / ca_mois_precedent * 100)
-                if ca_mois_precedent > 0 else 0
+                ((ca - ca_prev) / ca_prev * 100) if ca_prev > 0 else 0
             ),
-            'marge_brute': float(ca_mois - achats_mois),
+            'marge_brute': float(ca - achats),
             'marge_pourcentage': float(
-                ((ca_mois - achats_mois) / ca_mois * 100)
-                if ca_mois > 0 else 0
+                ((ca - achats) / ca * 100) if ca > 0 else 0
             ),
             'tresorerie': float(tresorerie),
-            'ventes_mois': float(ca_mois),
-            'achats_mois': float(achats_mois),
+            'ventes_mois': float(ca),
+            'achats_mois': float(achats),
             'charges_mois': 0,
             'alertes': alertes,
         }
 
-        cache.set(cache_key, data, 60 * 5)
+        cache.set(cache_key, data, 60 * 5)  # 5 min
         return Response(data)
 
 
@@ -1075,7 +1126,6 @@ class CompteResultatView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # ✅ 2 requêtes au lieu de N
         produits = {
             'ventes': float(
                 FactureComptable.objects.filter(
@@ -1143,7 +1193,6 @@ class BilanView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # ✅ 4 requêtes au lieu de N
         encaissements = Reglement.objects.filter(
             agence=agence, type_reglement='client',
             date_reglement__lte=date_cloture,
@@ -1217,12 +1266,12 @@ class TresorerieView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # ✅ 4 requêtes au lieu de N
         solde_initial = Reglement.objects.filter(
             agence=agence, date_reglement__lt=date_debut,
         ).aggregate(
             encaissements=Sum('montant', filter=Q(type_reglement='client')),
-            decaissements=Sum('montant', filter=Q(type_reglement='fournisseur')),
+            decaissements=Sum('montant', filter=Q(
+                type_reglement='fournisseur')),
         )
         solde_init = (
             (solde_initial['encaissements'] or 0) -
@@ -1236,7 +1285,7 @@ class TresorerieView(APIView):
                 date_reglement__gte=date_debut,
                 date_reglement__lte=date_fin,
             )
-            .select_related('client')
+            .select_related('client', 'facture')
         )
 
         decaissements_qs = (
@@ -1246,11 +1295,13 @@ class TresorerieView(APIView):
                 date_reglement__gte=date_debut,
                 date_reglement__lte=date_fin,
             )
-            .select_related('fournisseur')
+            .select_related('fournisseur', 'facture')
         )
 
-        total_enc = encaissements_qs.aggregate(total=Sum('montant'))['total'] or 0
-        total_dec = decaissements_qs.aggregate(total=Sum('montant'))['total'] or 0
+        total_enc = encaissements_qs.aggregate(
+            total=Sum('montant'))['total'] or 0
+        total_dec = decaissements_qs.aggregate(
+            total=Sum('montant'))['total'] or 0
 
         data = {
             'agence_id': agence.id,
