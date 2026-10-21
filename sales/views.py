@@ -5,7 +5,7 @@ from decimal import Decimal
 from io import BytesIO
 
 from django.db import transaction
-from django.db.models import Sum, Q, Count, Exists, OuterRef, Prefetch
+from django.db.models import Sum, Q, Count, Exists, OuterRef, Prefetch, F
 from django.core.cache import cache
 from django.http import HttpResponse
 from django.utils import timezone
@@ -42,15 +42,37 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# CACHE
+# HELPERS
+# ============================================================
+def _parse_date(value):
+    """Parse 'YYYY-MM-DD' → date, ou None."""
+    from datetime import datetime
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None
+
+
+# ============================================================
+# CACHE — Purge ROBUSTE
 # ============================================================
 def _purge_sales_cache():
-    """Purge le cache sales après mutation."""
+    """
+    ✅ Purge le cache sales après mutation.
+    - Redis       : delete_pattern → sélectif
+    - LocMemCache : clear() → fallback
+    """
     try:
         cache.delete_pattern('sales_stats_*')
         cache.delete_pattern('sales_dashboard_*')
-    except Exception:
+        cache.delete_pattern('sales_paiement_stats_*')
+        cache.delete_pattern('sales_facture_stats_*')
+    except AttributeError:
         cache.clear()
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -84,7 +106,6 @@ class ClientViewSet(viewsets.ModelViewSet):
             if not agences.exists():
                 return Client.objects.none()
             agences_ids = list(agences.values_list('id', flat=True))
-            # ✅ Exists(Subquery) → plus rapide que Q(ventes__…)
             base = base.filter(
                 Q(created_by=user) |
                 Exists(Vente.objects.filter(
@@ -94,7 +115,6 @@ class ClientViewSet(viewsets.ModelViewSet):
             )
 
         if self.action == 'list':
-            # ✅ Agrégats SQL → 0 N+1
             base = base.annotate(
                 ventes_count=Count('ventes', distinct=True),
                 total_achats=Sum('ventes__total'),
@@ -117,7 +137,8 @@ class ClientViewSet(viewsets.ModelViewSet):
                 ),
             )
 
-        return base.distinct()
+        # ✅ Tri stable pour la pagination
+        return base.distinct().order_by('nom', 'id')
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -150,15 +171,15 @@ class ClientViewSet(viewsets.ModelViewSet):
 class VenteViewSet(viewsets.ModelViewSet):
     """
     ViewSet pour la gestion des ventes - SANS TVA.
-    Inclut la fonctionnalité de paiement automatique.
+    ✅ Pagination serveur + dates + payment_filter + tri stable
     """
     permission_classes = [IsAuthenticated, HasAgenceAccess]
     pagination_class = VentePagination
     filter_backends = [DjangoFilterBackend,
                        filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'agence', 'type_vente', 'est_paye']
-    search_fields = ['reference', 'client__nom']
-    ordering_fields = ['date_vente', 'total']
+    search_fields = ['reference', 'client__nom', 'client__raison_sociale']
+    ordering_fields = ['date_vente', 'total', 'created_at']
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -179,6 +200,34 @@ class VenteViewSet(viewsets.ModelViewSet):
             base = base.filter(agence__in=user.get_agences())
         else:
             base = base.filter(vendeur=user)
+
+        # ✅ Filtres date index-friendly
+        date_from = _parse_date(self.request.query_params.get('date_from'))
+        if date_from:
+            base = base.filter(date_vente__gte=date_from)
+
+        date_to = _parse_date(self.request.query_params.get('date_to'))
+        if date_to:
+            from datetime import timedelta
+            base = base.filter(date_vente__lt=date_to + timedelta(days=1))
+
+        # ✅ Filtre paiement
+        payment_filter = self.request.query_params.get('payment_filter')
+        if payment_filter == 'paid':
+            base = base.filter(est_paye=True)
+        elif payment_filter == 'unpaid':
+            base = base.filter(
+                est_paye=False,
+                status__in=['approved', 'completed'],
+            )
+        elif payment_filter == 'partial':
+            base = base.filter(
+                est_paye=False,
+                montant_paye__gt=0,
+            )
+
+        # ✅ Tri stable
+        base = base.order_by('-date_vente', '-id')
 
         if self.action == 'retrieve':
             base = base.prefetch_related(
@@ -201,6 +250,10 @@ class VenteViewSet(viewsets.ModelViewSet):
         serializer.save()
         _purge_sales_cache()
 
+    def perform_update(self, serializer):
+        serializer.save()
+        _purge_sales_cache()
+
     # ============================================================
     # ACTION : VENTES SANS FACTURE
     # ============================================================
@@ -209,7 +262,6 @@ class VenteViewSet(viewsets.ModelViewSet):
         qs = self.get_queryset().filter(
             status__in=['approved', 'completed']
         ).filter(agence__isnull=False)
-        # ✅ Exists(Subquery) au lieu de "id__in=liste_de_tous_les_ids"
         qs = qs.filter(~Exists(Facture.objects.filter(vente=OuterRef('pk'))))
 
         page = self.paginate_queryset(qs)
@@ -341,7 +393,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         })
 
     # ============================================================
-    # ACTION : APPROUVER
+    # ACTION : APPROUVER (✅ FIX total_price)
     # ============================================================
     @action(detail=True, methods=['post'])
     @transaction.atomic
@@ -377,6 +429,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         )
         stock_insuffisant = []
         mouvements = []
+        items_updated = []
 
         for item in items_to_process:
             quantity_needed = item.quantity
@@ -428,8 +481,7 @@ class VenteViewSet(viewsets.ModelViewSet):
 
             if remaining > 0:
                 warehouse_stock.quantity -= remaining
-                warehouse_stock.save(
-                    update_fields=['quantity', 'last_updated'])
+                warehouse_stock.save(update_fields=['quantity', 'last_updated'])
                 mouvements.append({
                     'product': item.product,
                     'variant': item.variant,
@@ -441,9 +493,7 @@ class VenteViewSet(viewsets.ModelViewSet):
 
             item.warehouse_source = warehouse
             item.stock_preleve = True
-            item.save(update_fields=[
-                'warehouse_source', 'stock_preleve'
-            ])
+            items_updated.append(item)
 
         if stock_insuffisant:
             return Response(
@@ -452,26 +502,39 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        for mov in mouvements:
-            note = (
-                f"Vente {vente.reference} - Lot {mov['lot'].lot_number}"
-                if mov['source_type'] == 'lot'
-                else f"Vente {vente.reference} - Prélèvement depuis stock (sans lot)"
-            )
-            StockMovement.objects.create(
-                movement_type='out',
-                reference_type='sale',
-                reference_id=vente.id,
-                product=mov['product'],
-                variant=mov['variant'],
-                quantity=mov['quantity'],
-                from_warehouse=warehouse,
-                unit_price=mov['unit_price'],
-                notes=note,
-                created_by=user,
+        # ✅ UN SEUL UPDATE
+        if items_updated:
+            VenteItem.objects.bulk_update(
+                items_updated,
+                ['warehouse_source', 'stock_preleve'],
             )
 
-        # ✅ Recalcul du stock global produit en SQL (1 requête au lieu de N)
+        # ✅ FIX : Mouvements OUT en bulk AVEC total_price
+        if mouvements:
+            StockMovement.objects.bulk_create([
+                StockMovement(
+                    movement_type='out',
+                    reference_type='sale',
+                    reference_id=vente.id,
+                    product=mov['product'],
+                    variant=mov['variant'],
+                    quantity=mov['quantity'],
+                    from_warehouse=warehouse,
+                    unit_price=mov['unit_price'] or Decimal('0'),
+                    total_price=(
+                        (mov['unit_price'] or Decimal('0')) * mov['quantity']
+                    ),
+                    notes=(
+                        f"Vente {vente.reference} - Lot {mov['lot'].lot_number}"
+                        if mov['source_type'] == 'lot'
+                        else f"Vente {vente.reference} - Prélèvement stock (sans lot)"
+                    ),
+                    created_by=user,
+                )
+                for mov in mouvements
+            ])
+
+        # ✅ Recalcul stock global SQL
         product_ids = list({item.product_id for item in items_to_process})
         totals = (
             WarehouseStock.objects
@@ -491,6 +554,7 @@ class VenteViewSet(viewsets.ModelViewSet):
             'status', 'approved_by', 'date_approbation', 'updated_at'
         ])
 
+        # Facture auto
         facture_creee = False
         facture_reference = None
 
@@ -518,8 +582,7 @@ class VenteViewSet(viewsets.ModelViewSet):
                 logger.info(
                     f"✅ Facture {facture.reference} créée pour la vente {vente.reference}")
             except Exception as e:
-                logger.error(
-                    f"❌ Erreur création facture: {str(e)}")
+                logger.error(f"❌ Erreur création facture: {str(e)}")
         else:
             facture_creee = True
             facture_reference = facture_existante.reference
@@ -598,7 +661,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         })
 
     # ============================================================
-    # ACTION : ANNULER
+    # ACTION : ANNULER (✅ FIX total_price)
     # ============================================================
     @action(detail=True, methods=['post'])
     @transaction.atomic
@@ -612,8 +675,8 @@ class VenteViewSet(viewsets.ModelViewSet):
             )
 
         stock_restauration = {}
-        items = vente.items.select_related(
-            'product', 'variant', 'lot', 'warehouse_source').all()
+        items = list(vente.items.select_related(
+            'product', 'variant', 'lot', 'warehouse_source').all())
 
         for item in items:
             if not item.stock_preleve:
@@ -632,11 +695,13 @@ class VenteViewSet(viewsets.ModelViewSet):
                 item.lot.quantity += item.quantity
                 item.lot.save(update_fields=['quantity', 'updated_at'])
 
+        # ✅ FIX : Mouvements IN en bulk AVEC total_price=0
+        mouvements_in = []
         for key, group in stock_restauration.items():
             if not group['warehouse']:
                 continue
 
-            StockMovement.objects.create(
+            mouvements_in.append(StockMovement(
                 movement_type='in',
                 reference_type='sale',
                 reference_id=vente.id,
@@ -644,13 +709,15 @@ class VenteViewSet(viewsets.ModelViewSet):
                 variant=group['variant'],
                 quantity=group['total_quantity'],
                 to_warehouse=group['warehouse'],
-                unit_price=0,
+                unit_price=Decimal('0'),
+                total_price=Decimal('0'),
                 notes=(
                     f"Annulation vente {vente.reference} - "
                     f"{group['total_quantity']} unités restituées"
                 ),
                 created_by=request.user,
-            )
+            ))
+
             stock, _ = WarehouseStock.objects.get_or_create(
                 product=group['product'],
                 warehouse=group['warehouse'],
@@ -660,7 +727,10 @@ class VenteViewSet(viewsets.ModelViewSet):
             stock.quantity += group['total_quantity']
             stock.save(update_fields=['quantity', 'last_updated'])
 
-        # ✅ Recalcul SQL
+        if mouvements_in:
+            StockMovement.objects.bulk_create(mouvements_in)
+
+        # Recalcul SQL
         product_ids = list({item.product_id for item in items})
         totals = (
             WarehouseStock.objects
@@ -742,7 +812,6 @@ class VenteViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ✅ Utilise le serializer pour valider les destinations/méthode
         payload = {
             'facture': facture.id,
             'montant': montant_restant,
@@ -798,7 +867,7 @@ class VenteViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_201_CREATED)
 
     # ============================================================
-    # ACTION : STATISTIQUES (avec cache)
+    # ACTION : STATISTIQUES (cache 60s)
     # ============================================================
     @action(detail=False, methods=['get'])
     def stats(self, request):
@@ -820,14 +889,29 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         data = {
             'total': ventes.count(),
-            'total_ca': ventes.filter(status='completed').aggregate(total=Sum('total'))['total'] or 0,
-            'ca_today': ventes_today.filter(status='completed').aggregate(total=Sum('total'))['total'] or 0,
+            'total_ca': float(
+                ventes.filter(status='completed')
+                .aggregate(total=Sum('total'))['total'] or 0
+            ),
+            'ca_today': float(
+                ventes_today.filter(status='completed')
+                .aggregate(total=Sum('total'))['total'] or 0
+            ),
             'en_attente': ventes.filter(status='pending_approval').count(),
             'approuvees': ventes.filter(status='approved').count(),
             'completees': ventes.filter(status='completed').count(),
             'rejetees': ventes.filter(status='rejected').count(),
             'annulees': ventes.filter(status='cancelled').count(),
-            'impayes': ventes.filter(est_paye=False, status__in=['approved', 'completed']).aggregate(total=Sum('montant_du'))['total'] or 0,
+            'impayes': float(
+                ventes.filter(
+                    est_paye=False,
+                    status__in=['approved', 'completed'],
+                ).aggregate(total=Sum('montant_du'))['total'] or 0
+            ),
+            'payees': ventes.filter(est_paye=True).count(),
+            'total_paye': float(
+                ventes.aggregate(total=Sum('montant_paye'))['total'] or 0
+            ),
         }
         cache.set(cache_key, data, 60)
         return Response(data)
@@ -883,6 +967,8 @@ class PaiementViewSet(viewsets.ModelViewSet):
             'vente', 'caisse_destination', 'compte_destination',
             'mouvement_tresorerie',
         )
+
+        base = base.order_by('-date_paiement', '-id')
 
         if user.est_pdg() or user.est_drh():
             return base
@@ -947,8 +1033,13 @@ class PaiementViewSet(viewsets.ModelViewSet):
         today = timezone.now().date()
         stats_data = {
             'total': paiements.count(),
-            'total_montant': paiements.aggregate(total=Sum('montant'))['total'] or 0,
-            'montant_jour': paiements.filter(date_paiement=today).aggregate(total=Sum('montant'))['total'] or 0,
+            'total_montant': float(
+                paiements.aggregate(total=Sum('montant'))['total'] or 0
+            ),
+            'montant_jour': float(
+                paiements.filter(date_paiement=today)
+                .aggregate(total=Sum('montant'))['total'] or 0
+            ),
             'par_methode': {},
             'par_statut': {},
         }
@@ -957,14 +1048,18 @@ class PaiementViewSet(viewsets.ModelViewSet):
             stats_data['par_methode'][methode] = {
                 'label': label,
                 'count': qs.count(),
-                'montant': qs.aggregate(total=Sum('montant'))['total'] or 0,
+                'montant': float(
+                    qs.aggregate(total=Sum('montant'))['total'] or 0
+                ),
             }
         for statut, label in Paiement.STATUT_PAIEMENT:
             qs = paiements.filter(statut=statut)
             stats_data['par_statut'][statut] = {
                 'label': label,
                 'count': qs.count(),
-                'montant': qs.aggregate(total=Sum('montant'))['total'] or 0,
+                'montant': float(
+                    qs.aggregate(total=Sum('montant'))['total'] or 0
+                ),
             }
 
         cache.set(cache_key, stats_data, 60)
@@ -1000,6 +1095,8 @@ class DevisViewSet(viewsets.ModelViewSet):
             pass
         else:
             base = base.filter(agence__in=user.get_agences())
+
+        base = base.order_by('-date_creation', '-id')
 
         if self.action == 'retrieve':
             base = base.prefetch_related(
@@ -1291,6 +1388,8 @@ class FactureViewSet(viewsets.ModelViewSet):
         else:
             base = base.filter(agence__in=user.get_agences())
 
+        base = base.order_by('-date_facture', '-id')
+
         if self.action == 'retrieve':
             base = base.prefetch_related(
                 Prefetch(
@@ -1324,7 +1423,6 @@ class FactureViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Utilise la logique du modèle Paiement (mise à jour auto + trésorerie)
         Paiement.objects.create(
             facture=facture,
             client=facture.client,
@@ -1411,9 +1509,15 @@ class FactureViewSet(viewsets.ModelViewSet):
         today = timezone.now().date()
         stats = {
             'total_factures': factures.count(),
-            'total_montant': factures.aggregate(total=Sum('total_ttc'))['total'] or 0,
-            'total_paye': factures.aggregate(total=Sum('montant_paye'))['total'] or 0,
-            'total_restant': factures.aggregate(total=Sum('montant_restant'))['total'] or 0,
+            'total_montant': float(
+                factures.aggregate(total=Sum('total_ttc'))['total'] or 0
+            ),
+            'total_paye': float(
+                factures.aggregate(total=Sum('montant_paye'))['total'] or 0
+            ),
+            'total_restant': float(
+                factures.aggregate(total=Sum('montant_restant'))['total'] or 0
+            ),
             'par_statut': {},
             'par_type': {},
             'factures_impayees': 0,
@@ -1426,30 +1530,42 @@ class FactureViewSet(viewsets.ModelViewSet):
             stats['par_statut'][status_code] = {
                 'label': status_label,
                 'count': qs.count(),
-                'montant': qs.aggregate(total=Sum('total_ttc'))['total'] or 0,
-                'paye': qs.aggregate(total=Sum('montant_paye'))['total'] or 0,
+                'montant': float(
+                    qs.aggregate(total=Sum('total_ttc'))['total'] or 0
+                ),
+                'paye': float(
+                    qs.aggregate(total=Sum('montant_paye'))['total'] or 0
+                ),
             }
         for type_code, type_label in Facture.TYPE_FACTURE:
             qs = factures.filter(type_facture=type_code)
             stats['par_type'][type_code] = {
                 'label': type_label,
                 'count': qs.count(),
-                'montant': qs.aggregate(total=Sum('total_ttc'))['total'] or 0,
+                'montant': float(
+                    qs.aggregate(total=Sum('total_ttc'))['total'] or 0
+                ),
             }
         factures_impayees = factures.exclude(status__in=['paid', 'cancelled'])
         stats['factures_impayees'] = factures_impayees.count()
-        stats['montant_impayes'] = factures_impayees.aggregate(
-            total=Sum('montant_restant'))['total'] or 0
+        stats['montant_impayes'] = float(
+            factures_impayees.aggregate(
+                total=Sum('montant_restant'))['total'] or 0
+        )
         factures_retard = factures.filter(
             status='overdue', date_echeance__lt=today)
         stats['factures_en_retard'] = factures_retard.count()
-        stats['montant_en_retard'] = factures_retard.aggregate(
-            total=Sum('montant_restant'))['total'] or 0
+        stats['montant_en_retard'] = float(
+            factures_retard.aggregate(
+                total=Sum('montant_restant'))['total'] or 0
+        )
         start_of_month = today.replace(day=1)
         factures_mois = factures.filter(date_facture__gte=start_of_month)
         stats['factures_mois'] = factures_mois.count()
-        stats['montant_mois'] = factures_mois.aggregate(
-            total=Sum('total_ttc'))['total'] or 0
+        stats['montant_mois'] = float(
+            factures_mois.aggregate(
+                total=Sum('total_ttc'))['total'] or 0
+        )
 
         cache.set(cache_key, stats, 60)
         return Response(stats)
@@ -1691,12 +1807,20 @@ class DashboardVentesView(generics.GenericAPIView):
 
         data = {
             'total_ventes': ventes.count(),
-            'total_ca': ventes.filter(status='completed').aggregate(total=Sum('total'))['total'] or 0,
-            'ca_jour': ventes_aujourdhui.filter(status='completed').aggregate(total=Sum('total'))['total'] or 0,
+            'total_ca': float(
+                ventes.filter(status='completed')
+                .aggregate(total=Sum('total'))['total'] or 0
+            ),
+            'ca_jour': float(
+                ventes_aujourdhui.filter(status='completed')
+                .aggregate(total=Sum('total'))['total'] or 0
+            ),
             'ventes_en_attente': ventes.filter(status='pending_approval').count(),
-            'impayes': ventes.filter(
-                est_paye=False, status__in=['approved', 'completed']
-            ).aggregate(total=Sum('montant_du'))['total'] or 0,
+            'impayes': float(
+                ventes.filter(
+                    est_paye=False, status__in=['approved', 'completed']
+                ).aggregate(total=Sum('montant_du'))['total'] or 0
+            ),
         }
         cache.set(cache_key, data, 60)
         return Response(data)
