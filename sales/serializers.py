@@ -1,33 +1,78 @@
+# sales/serializers.py
+
 from rest_framework import serializers
 from django.db.models import Sum
 from decimal import Decimal
 from django.utils import timezone
+
 from .models import *
 from produits.serializers import ProductListSerializer
 from users.serializers import UserSerializer, AgenceSimpleSerializer
-from inventaire.models import Lot  # <-- AJOUT
-# si vous voulez afficher des détails
+from inventaire.models import Lot
 from inventaire.serializers import LotListSerializer
 
 
+# ============================================================
+# HELPERS
+# ============================================================
+def _dec_or_zero(value):
+    """Retourne Decimal(0) si la valeur est None."""
+    return value if value is not None else Decimal('0')
+
+
+# ============================================================
+# CLIENT
+# ============================================================
 class ClientSerializer(serializers.ModelSerializer):
+    """Serializer de base (création / mise à jour)."""
     class Meta:
         model = Client
         fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at', 'created_by')
 
 
+class ClientListSerializer(serializers.ModelSerializer):
+    """
+    ✅ Serializer allégé pour la liste.
+    Utilise les annotations `ventes_count`, `total_achats`, `total_paye`
+    injectées par le ViewSet → 0 N+1.
+    """
+    ventes_count = serializers.IntegerField(read_only=True, default=0)
+    total_achats = serializers.SerializerMethodField()
+    total_paye = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Client
+        fields = (
+            'id', 'client_type', 'nom', 'prenom', 'email', 'telephone',
+            'adresse', 'raison_sociale', 'numero_tva', 'est_revendeur',
+            'is_active', 'created_at', 'updated_at',
+            'ventes_count', 'total_achats', 'total_paye',
+        )
+
+    def get_total_achats(self, obj):
+        value = getattr(obj, 'total_achats', None)
+        return _dec_or_zero(value)
+
+    def get_total_paye(self, obj):
+        value = getattr(obj, 'total_paye', None)
+        return _dec_or_zero(value)
+
+
 class ClientDetailSerializer(serializers.ModelSerializer):
-    """Serializer de détail du client avec ses relations"""
+    """
+    ✅ Serializer de détail.
+    - Utilise les annotations du ViewSet (`total_ventes`, `total_achats`, etc.)
+    - Utilise le Prefetch `_ventes_prefetched` si présent
+    - Fallback : requête ciblée (jamais `obj.ventes.all()` en boucle)
+    """
     ventes = serializers.SerializerMethodField()
     factures = serializers.SerializerMethodField()
-    total_ventes = serializers.IntegerField(read_only=True)
-    total_achats = serializers.DecimalField(
-        max_digits=12, decimal_places=2, read_only=True)
-    total_paye = serializers.DecimalField(
-        max_digits=12, decimal_places=2, read_only=True)
-    reste_a_payer = serializers.DecimalField(
-        max_digits=12, decimal_places=2, read_only=True)
+    total_ventes = serializers.SerializerMethodField()
+    total_factures = serializers.SerializerMethodField()
+    total_achats = serializers.SerializerMethodField()
+    total_paye = serializers.SerializerMethodField()
+    reste_a_payer = serializers.SerializerMethodField()
     created_by_name = serializers.CharField(
         source='created_by.email', read_only=True, default='')
 
@@ -36,41 +81,59 @@ class ClientDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at', 'created_by')
 
+    # ---------- relations ----------
     def get_ventes(self, obj):
-        """Récupère uniquement les ventes du client"""
-        ventes = obj.ventes.all().order_by('-date_vente')
-        return VenteListSerializer(ventes, many=True, context=self.context).data
+        qs = getattr(obj, '_ventes_prefetched', None)
+        if qs is None:
+            # fallback : on charge seulement 20 dernières pour le détail
+            qs = (obj.ventes
+                  .select_related('agence', 'client', 'vendeur')
+                  .order_by('-date_vente')[:20])
+        return VenteListSerializer(qs, many=True, context=self.context).data
 
     def get_factures(self, obj):
-        """Récupère uniquement les factures du client"""
-        # Utiliser le filtre direct sur Facture car le related_name n'est pas défini
-        from .models import Facture
-        factures = Facture.objects.filter(client=obj).order_by('-date_facture')
-        return FactureListSerializer(factures, many=True, context=self.context).data
+        qs = getattr(obj, '_factures_prefetched', None)
+        if qs is None:
+            qs = (Facture.objects
+                  .filter(client=obj)
+                  .select_related('agence', 'client')
+                  .order_by('-date_facture')[:20])
+        return FactureListSerializer(qs, many=True, context=self.context).data
 
-    def to_representation(self, instance):
-        """Ajoute les statistiques calculées"""
-        data = super().to_representation(instance)
+    # ---------- stats ----------
+    def get_total_ventes(self, obj):
+        v = getattr(obj, 'total_ventes', None)
+        if v is not None:
+            return v
+        return obj.ventes.count()
 
-        # Calculer les statistiques
-        ventes_qs = instance.ventes.all()
-        total_achats = ventes_qs.aggregate(total=Sum('total'))['total'] or 0
-        total_paye = ventes_qs.aggregate(
-            total=Sum('montant_paye'))['total'] or 0
+    def get_total_factures(self, obj):
+        v = getattr(obj, 'total_factures', None)
+        if v is not None:
+            return v
+        return Facture.objects.filter(client=obj).count()
 
-        data['total_ventes'] = ventes_qs.count()
-        data['total_factures'] = Facture.objects.filter(
-            client=instance).count()
-        data['total_achats'] = total_achats
-        data['total_paye'] = total_paye
-        data['reste_a_payer'] = total_achats - total_paye
+    def get_total_achats(self, obj):
+        v = getattr(obj, 'total_achats', None)
+        if v is not None:
+            return _dec_or_zero(v)
+        return _dec_or_zero(obj.ventes.aggregate(t=Sum('total'))['t'])
 
-        return data
+    def get_total_paye(self, obj):
+        v = getattr(obj, 'total_paye', None)
+        if v is not None:
+            return _dec_or_zero(v)
+        return _dec_or_zero(obj.ventes.aggregate(t=Sum('montant_paye'))['t'])
+
+    def get_reste_a_payer(self, obj):
+        achats = self.get_total_achats(obj)
+        paye = self.get_total_paye(obj)
+        return _dec_or_zero(achats) - _dec_or_zero(paye)
+
+
 # ============================================================
-# VENTE ITEM SERIALIZER – avec lot
+# VENTE ITEM
 # ============================================================
-
-
 class VenteItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
@@ -78,7 +141,6 @@ class VenteItemSerializer(serializers.ModelSerializer):
     price_type_display = serializers.CharField(
         source='get_price_type_display', read_only=True)
 
-    # Champs supplémentaires pour le lot
     lot_number = serializers.CharField(
         source='lot.lot_number', read_only=True, allow_null=True)
     lot_expiry = serializers.DateField(
@@ -95,16 +157,18 @@ class VenteItemSerializer(serializers.ModelSerializer):
             'lot_number', 'lot_expiry', 'lot_quantity'
         )
         extra_kwargs = {
-            # le champ lot est en écriture (ID)
             'lot': {'required': False, 'allow_null': True}
         }
 
 
 # ============================================================
-# VENTE LIST SERIALIZER (inchangé)
+# VENTE LIST
 # ============================================================
 class VenteListSerializer(serializers.ModelSerializer):
+    agence_id = serializers.IntegerField(source='agence.id', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
+    client_id = serializers.IntegerField(
+        source='client.id', read_only=True, allow_null=True)
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, allow_null=True)
     vendeur_nom = serializers.CharField(source='vendeur.email', read_only=True)
@@ -114,15 +178,17 @@ class VenteListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vente
         fields = (
-            'id', 'reference', 'type_vente', 'agence_nom', 'client_nom',
+            'id', 'reference', 'type_vente',
+            'agence_id', 'agence_nom',
+            'client_id', 'client_nom',
             'vendeur_nom', 'status', 'status_display', 'date_vente',
             'sous_total', 'remise', 'total', 'montant_paye',
-            'montant_du', 'est_paye'
+            'montant_du', 'est_paye',
         )
 
 
 # ============================================================
-# VENTE DETAIL SERIALIZER (inchangé)
+# VENTE DETAIL
 # ============================================================
 class VenteDetailSerializer(serializers.ModelSerializer):
     agence = AgenceSimpleSerializer(read_only=True)
@@ -139,7 +205,7 @@ class VenteDetailSerializer(serializers.ModelSerializer):
 
 
 # ============================================================
-# VENTE CREATE SERIALIZER – avec gestion des lots
+# VENTE CREATE (avec gestion des lots)
 # ============================================================
 class VenteCreateSerializer(serializers.ModelSerializer):
     items = VenteItemSerializer(many=True, write_only=True)
@@ -165,18 +231,14 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"agence": "L'agence est obligatoire"})
 
-        # Récupérer l'entrepôt par défaut de l'agence
         from inventaire.models import get_default_warehouse
         warehouse = get_default_warehouse(agence)
         if not warehouse:
             raise serializers.ValidationError(
                 {"agence": "Aucun entrepôt configuré pour cette agence"})
 
-        # Valider chaque item
         for idx, item_data in enumerate(items_data):
-            product = item_data.get('product')
             quantity = item_data.get('quantity', 0)
-            # peut être un ID (int) ou un objet Lot
             lot_id = item_data.get('lot')
 
             if lot_id:
@@ -187,27 +249,29 @@ class VenteCreateSerializer(serializers.ModelSerializer):
                         lot_obj = Lot.objects.get(id=int(lot_id))
                 except Lot.DoesNotExist:
                     raise serializers.ValidationError({
-                        f"items[{idx}]": f"Lot {lot_id} introuvable"
-                    })
+                        f"items[{idx}]": f"Lot {lot_id} introuvable"})
 
-                # Vérifications du lot
                 if lot_obj.warehouse != warehouse:
                     raise serializers.ValidationError({
-                        f"items[{idx}]": f"Le lot {lot_obj.lot_number} n'appartient pas à l'entrepôt de l'agence"
-                    })
+                        f"items[{idx}]": (
+                            f"Le lot {lot_obj.lot_number} n'appartient pas "
+                            f"à l'entrepôt de l'agence"
+                        )})
                 if lot_obj.quantity < quantity:
                     raise serializers.ValidationError({
-                        f"items[{idx}]": f"Le lot {lot_obj.lot_number} n'a que {lot_obj.quantity} unités disponibles, vous demandez {quantity}"
-                    })
+                        f"items[{idx}]": (
+                            f"Le lot {lot_obj.lot_number} n'a que "
+                            f"{lot_obj.quantity} unités disponibles, "
+                            f"vous demandez {quantity}"
+                        )})
                 if lot_obj.quality_status != 'good':
                     raise serializers.ValidationError({
-                        f"items[{idx}]": f"Le lot {lot_obj.lot_number} n'est pas en bon état (statut: {lot_obj.get_quality_status_display()})"
-                    })
+                        f"items[{idx}]": (
+                            f"Le lot {lot_obj.lot_number} n'est pas en bon "
+                            f"état (statut: {lot_obj.get_quality_status_display()})"
+                        )})
 
-                # On remplace l'éventuel objet Lot par son ID pour la création
                 item_data['lot'] = lot_obj.id
-
-            # Si pas de lot, on laisse le champ vide (None) – le système fera FIFO à l'approbation
 
         return data
 
@@ -230,18 +294,19 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             vendeur=user,
             sous_total=sous_total,
             total=total,
-            montant_du=total
+            montant_du=total,
         )
 
-        # Création des lignes de vente
         for item_data in items_data:
-            # Extraire le lot (qui est un ID ou None)
             lot_id = item_data.pop('lot', None)
             VenteItem.objects.create(vente=vente, lot_id=lot_id, **item_data)
 
         return vente
 
 
+# ============================================================
+# DEVIS
+# ============================================================
 class DevisItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
@@ -255,8 +320,11 @@ class DevisItemSerializer(serializers.ModelSerializer):
 
 
 class DevisListSerializer(serializers.ModelSerializer):
+    client_id = serializers.IntegerField(
+        source='client.id', read_only=True, allow_null=True)
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, allow_null=True)
+    agence_id = serializers.IntegerField(source='agence.id', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
     vendeur_nom = serializers.CharField(source='vendeur.email', read_only=True)
     status_display = serializers.CharField(
@@ -264,9 +332,14 @@ class DevisListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Devis
-        fields = ('id', 'reference', 'client_nom', 'agence_nom', 'vendeur_nom', 'status',
-                  'status_display', 'date_creation', 'date_expiration', 'sous_total',
-                  'remise', 'total')  # Pas de TVA
+        fields = (
+            'id', 'reference',
+            'client_id', 'client_nom',
+            'agence_id', 'agence_nom',
+            'vendeur_nom', 'status', 'status_display',
+            'date_creation', 'date_expiration',
+            'sous_total', 'remise', 'total',
+        )
 
 
 class DevisDetailSerializer(serializers.ModelSerializer):
@@ -279,7 +352,7 @@ class DevisDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Devis
-        fields = '__all__'  # Pas de TVA
+        fields = '__all__'
 
 
 class DevisCreateSerializer(serializers.ModelSerializer):
@@ -314,14 +387,14 @@ class DevisCreateSerializer(serializers.ModelSerializer):
             qte = Decimal(str(item.get('quantity', 0)))
             sous_total += prix * qte
 
-        total = sous_total  # Pas de TVA
+        total = sous_total
 
         devis = Devis.objects.create(
             **validated_data,
             client_id=client_id,
             vendeur=user,
             sous_total=sous_total,
-            total=total
+            total=total,
         )
 
         for item_data in items_data:
@@ -330,8 +403,11 @@ class DevisCreateSerializer(serializers.ModelSerializer):
         return devis
 
 
+# ============================================================
+# PAIEMENT
+# ============================================================
 class PaiementSerializer(serializers.ModelSerializer):
-    """Serializer de lecture pour un paiement (inclut les infos de destination)"""
+    """Lecture d'un paiement + infos facture + destination."""
     encaisse_par_nom = serializers.CharField(
         source='encaisse_par.email', read_only=True)
 
@@ -340,9 +416,11 @@ class PaiementSerializer(serializers.ModelSerializer):
     facture_date = serializers.DateField(
         source='facture.date_facture', read_only=True, default=None)
     facture_total = serializers.DecimalField(
-        source='facture.total_ttc', max_digits=12, decimal_places=2, read_only=True, default=0)
+        source='facture.total_ttc',
+        max_digits=12, decimal_places=2, read_only=True, default=0)
     facture_restant = serializers.DecimalField(
-        source='facture.montant_restant', max_digits=12, decimal_places=2, read_only=True, default=0)
+        source='facture.montant_restant',
+        max_digits=12, decimal_places=2, read_only=True, default=0)
 
     facture_client_nom = serializers.CharField(
         source='facture.client.nom', read_only=True, default='Anonyme')
@@ -370,9 +448,6 @@ class PaiementSerializer(serializers.ModelSerializer):
     client_raison_sociale = serializers.CharField(
         source='client.raison_sociale', read_only=True, default='')
 
-    # ============================================================
-    # NOUVEAUX CHAMPS : DESTINATION ET MOUVEMENT ASSOCIÉ
-    # ============================================================
     caisse_destination_nom = serializers.CharField(
         source='caisse_destination.nom', read_only=True, default=None)
     compte_destination_nom = serializers.CharField(
@@ -382,74 +457,74 @@ class PaiementSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Paiement
-        # On peut garder tous les champs (y compris les nouveaux)
         fields = '__all__'
-        read_only_fields = ('id', 'created_at', 'updated_at', 'encaisse_par',
-                            'mouvement_tresorerie')  # 'mouvement_tresorerie' en lecture seule
+        read_only_fields = (
+            'id', 'created_at', 'updated_at',
+            'encaisse_par', 'mouvement_tresorerie',
+        )
 
 
 class PaiementCreateSerializer(serializers.ModelSerializer):
-    """Serializer de création pour un paiement (inclut les champs de destination)"""
-
     class Meta:
         model = Paiement
-        fields = ('facture', 'montant', 'methode', 'reference_externe', 'notes',
-                  'caisse_destination', 'compte_destination')  # ajout des champs de destination
+        fields = (
+            'facture', 'montant', 'methode', 'reference_externe', 'notes',
+            'caisse_destination', 'compte_destination',
+        )
 
     def validate(self, data):
-        # --- Validation du montant par rapport au reste de la facture ---
         facture = data.get('facture')
         if not facture:
             raise serializers.ValidationError(
                 {"facture": "La facture est obligatoire."})
         if data['montant'] > facture.montant_restant:
             raise serializers.ValidationError({
-                "montant": f"Le montant ({data['montant']}) dépasse le restant dû ({facture.montant_restant} FCFA)."
+                "montant": (
+                    f"Le montant ({data['montant']}) dépasse le restant dû "
+                    f"({facture.montant_restant} FCFA)."
+                )
             })
 
-        # --- Validation des destinations ---
         caisse = data.get('caisse_destination')
         compte = data.get('compte_destination')
 
-        # Un seul des deux doit être renseigné
         if caisse and compte:
             raise serializers.ValidationError(
-                "Choisissez une seule destination : caisse ou compte bancaire."
-            )
+                "Choisissez une seule destination : caisse ou compte bancaire.")
 
-        # Si une destination est renseignée, elle doit appartenir à la même agence que la facture
         if caisse and caisse.agence != facture.agence:
-            raise serializers.ValidationError(
-                {"caisse_destination": "La caisse doit appartenir à la même agence que la facture."}
-            )
-        if compte and compte.agence != facture.agence:
-            raise serializers.ValidationError(
-                {"compte_destination": "Le compte bancaire doit appartenir à la même agence que la facture."}
-            )
+            raise serializers.ValidationError({
+                "caisse_destination":
+                "La caisse doit appartenir à la même agence que la facture."})
 
-        # Si aucune destination n'est précisée, on laissera le modèle tenter de prendre la caisse par défaut
-        # (la validation ne bloque pas, mais on peut ajouter un avertissement)
+        if compte and compte.agence != facture.agence:
+            raise serializers.ValidationError({
+                "compte_destination":
+                "Le compte bancaire doit appartenir à la même agence que la facture."})
+
         return data
 
     def create(self, validated_data):
-        # L'utilisateur qui encaisse est l'utilisateur connecté
         validated_data['encaisse_par'] = self.context['request'].user
 
-        # Récupérer la facture pour en extraire le client et la vente
         facture = validated_data.get('facture')
         if facture:
             validated_data['client'] = facture.client
             if facture.vente:
                 validated_data['vente'] = facture.vente
 
-        # Créer le paiement (le modèle fera le reste : mise à jour facture/vente et création mouvement)
-        paiement = super().create(validated_data)
-        return paiement
+        return super().create(validated_data)
 
 
+# ============================================================
+# FACTURE
+# ============================================================
 class FactureListSerializer(serializers.ModelSerializer):
+    client_id = serializers.IntegerField(
+        source='client.id', read_only=True, allow_null=True)
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, allow_null=True)
+    agence_id = serializers.IntegerField(source='agence.id', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
     statut_display = serializers.CharField(
         source='get_status_display', read_only=True)
@@ -458,9 +533,14 @@ class FactureListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Facture
-        fields = ('id', 'reference', 'type_facture', 'type_display', 'status', 'statut_display',
-                  'client_nom', 'agence_nom', 'date_facture', 'date_echeance',
-                  'total_ttc', 'montant_paye', 'montant_restant', 'currency')
+        fields = (
+            'id', 'reference', 'type_facture', 'type_display',
+            'status', 'statut_display',
+            'client_id', 'client_nom',
+            'agence_id', 'agence_nom',
+            'date_facture', 'date_echeance',
+            'total_ttc', 'montant_paye', 'montant_restant', 'currency',
+        )
 
 
 class FactureDetailSerializer(serializers.ModelSerializer):
@@ -472,11 +552,13 @@ class FactureDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Facture
-        fields = '__all__'  # Pas de champ tva
+        fields = '__all__'
 
     def get_items(self, obj):
         if obj.vente:
-            return VenteItemSerializer(obj.vente.items.all(), many=True).data
+            return VenteItemSerializer(
+                obj.vente.items.all(), many=True, context=self.context
+            ).data
         return []
 
 
@@ -485,9 +567,11 @@ class FactureCreateSerializer(serializers.ModelSerializer):
         model = Facture
         fields = ('vente', 'type_facture', 'date_echeance',
                   'conditions_paiement', 'notes', 'pied_de_page')
-        read_only_fields = ('id', 'reference', 'status', 'date_facture', 'cree_par',
-                            'sous_total', 'total_ttc', 'montant_paye', 'montant_restant',
-                            'client', 'agence', 'currency')  # tva supprimé
+        read_only_fields = (
+            'id', 'reference', 'status', 'date_facture', 'cree_par',
+            'sous_total', 'total_ttc', 'montant_paye', 'montant_restant',
+            'client', 'agence', 'currency',
+        )
 
     def validate(self, data):
         vente = data.get('vente')
@@ -518,10 +602,9 @@ class FactureCreateSerializer(serializers.ModelSerializer):
             notes=validated_data.get('notes', ''),
             pied_de_page=validated_data.get('pied_de_page', ''),
             sous_total=vente.sous_total,
-            # tva supprimé - pas de champ tva
             total_ttc=vente.total,
             montant_restant=vente.total,
-            montant_paye=vente.montant_paye
+            montant_paye=vente.montant_paye,
         )
         return facture
 

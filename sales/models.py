@@ -8,6 +8,9 @@ from users.models import CustomUser, Agence
 from produits.models import Product, ProductVariant
 
 
+# ============================================================
+# CLIENT
+# ============================================================
 class Client(models.Model):
     """Client (optionnel pour la vente)"""
     CLIENT_TYPES = (
@@ -34,6 +37,13 @@ class Client(models.Model):
 
     class Meta:
         ordering = ['nom']
+        indexes = [
+            models.Index(fields=['nom'], name='client_nom_idx'),
+            models.Index(fields=['telephone'], name='client_tel_idx'),
+            models.Index(fields=['is_active', 'client_type'],
+                         name='client_active_type_idx'),
+            models.Index(fields=['created_by'], name='client_created_by_idx'),
+        ]
 
     def __str__(self):
         if self.raison_sociale:
@@ -45,6 +55,9 @@ class Client(models.Model):
         return f"{self.nom} {self.prenom}" if self.prenom else self.nom
 
 
+# ============================================================
+# VENTE
+# ============================================================
 class Vente(models.Model):
     """Vente principale - SANS TVA"""
     STATUS_CHOICES = (
@@ -100,9 +113,18 @@ class Vente(models.Model):
     class Meta:
         ordering = ['-date_vente']
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['status']),
-            models.Index(fields=['agence', 'status']),
+            models.Index(fields=['reference'], name='vente_reference_idx'),
+            models.Index(fields=['status'], name='vente_status_idx'),
+            models.Index(fields=['agence', 'status'],
+                         name='vente_agence_status_idx'),
+            models.Index(fields=['agence', '-date_vente'],
+                         name='vente_agence_date_idx'),
+            models.Index(fields=['client', '-date_vente'],
+                         name='vente_client_date_idx'),
+            models.Index(fields=['vendeur', '-date_vente'],
+                         name='vente_vendeur_date_idx'),
+            models.Index(fields=['est_paye', 'status'],
+                         name='vente_paye_status_idx'),
         ]
 
     def __str__(self):
@@ -126,6 +148,9 @@ class Vente(models.Model):
         return self.total - self.montant_paye
 
 
+# ============================================================
+# VENTE ITEM
+# ============================================================
 class VenteItem(models.Model):
     """Ligne de vente avec type de prix"""
     PRICE_TYPE_CHOICES = (
@@ -164,6 +189,12 @@ class VenteItem(models.Model):
 
     class Meta:
         ordering = ['id']
+        indexes = [
+            models.Index(fields=['vente', 'product'],
+                         name='venteitem_vente_prod_idx'),
+            models.Index(fields=['product'], name='venteitem_product_idx'),
+            models.Index(fields=['lot'], name='venteitem_lot_idx'),
+        ]
 
     def __str__(self):
         return f"{self.product.name} x {self.quantity}"
@@ -173,6 +204,9 @@ class VenteItem(models.Model):
         super().save(*args, **kwargs)
 
 
+# ============================================================
+# DEVIS
+# ============================================================
 class Devis(models.Model):
     """Devis (proforma / estimation) avant transformation en vente - SANS TVA"""
     STATUS_CHOICES = (
@@ -216,9 +250,14 @@ class Devis(models.Model):
     class Meta:
         ordering = ['-date_creation']
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['status']),
-            models.Index(fields=['agence', 'status']),
+            models.Index(fields=['reference'], name='devis_reference_idx'),
+            models.Index(fields=['status'], name='devis_status_idx'),
+            models.Index(fields=['agence', 'status'],
+                         name='devis_agence_status_idx'),
+            models.Index(fields=['client', '-date_creation'],
+                         name='devis_client_date_idx'),
+            models.Index(fields=['date_expiration'],
+                         name='devis_expiration_idx'),
         ]
 
     def __str__(self):
@@ -240,7 +279,10 @@ class Devis(models.Model):
 
     @property
     def est_valide(self):
-        return self.status in ('draft', 'sent', 'accepted') and self.date_expiration >= timezone.now().date()
+        return (
+            self.status in ('draft', 'sent', 'accepted')
+            and self.date_expiration >= timezone.now().date()
+        )
 
     @property
     def jours_restants(self):
@@ -249,6 +291,9 @@ class Devis(models.Model):
         return 0
 
 
+# ============================================================
+# DEVIS ITEM
+# ============================================================
 class DevisItem(models.Model):
     """Ligne d'un devis - SANS TVA"""
     devis = models.ForeignKey(
@@ -265,6 +310,11 @@ class DevisItem(models.Model):
 
     class Meta:
         ordering = ['id']
+        indexes = [
+            models.Index(fields=['devis', 'product'],
+                         name='devisitem_devis_prod_idx'),
+            models.Index(fields=['product'], name='devisitem_product_idx'),
+        ]
 
     def __str__(self):
         return f"{self.product.name} x {self.quantity}"
@@ -274,6 +324,9 @@ class DevisItem(models.Model):
         super().save(*args, **kwargs)
 
 
+# ============================================================
+# FACTURE
+# ============================================================
 class Facture(models.Model):
     """Facture générée à partir d'une vente - SANS TVA"""
     STATUS_CHOICES = (
@@ -330,6 +383,19 @@ class Facture(models.Model):
         ordering = ['-date_facture']
         verbose_name = "Facture"
         verbose_name_plural = "Factures"
+        indexes = [
+            models.Index(fields=['reference'], name='facture_reference_idx'),
+            models.Index(fields=['status'], name='facture_status_idx'),
+            models.Index(fields=['agence', 'status'],
+                         name='facture_agence_status_idx'),
+            models.Index(fields=['agence', '-date_facture'],
+                         name='facture_agence_date_idx'),
+            models.Index(fields=['client', '-date_facture'],
+                         name='facture_client_date_idx'),
+            models.Index(fields=['date_echeance', 'status'],
+                         name='facture_echeance_status_idx'),
+            models.Index(fields=['vente'], name='facture_vente_idx'),
+        ]
 
     def __str__(self):
         return f"{self.reference} - {self.total_ttc} FCFA"
@@ -375,8 +441,10 @@ class Facture(models.Model):
             return (timezone.now().date() - self.date_echeance).days
         return 0
 
-# sales/models.py - Modèle Paiement COMPLET
 
+# ============================================================
+# PAIEMENT
+# ============================================================
 class Paiement(models.Model):
     """Paiement d'une facture"""
     METHODES_PAIEMENT = (
@@ -400,16 +468,16 @@ class Paiement(models.Model):
         Facture, on_delete=models.CASCADE, related_name='paiements'
     )
     client = models.ForeignKey(
-        Client, on_delete=models.PROTECT, null=True, blank=True, 
+        Client, on_delete=models.PROTECT, null=True, blank=True,
         related_name='paiements'
     )
     vente = models.ForeignKey(
-        Vente, on_delete=models.PROTECT, null=True, blank=True, 
+        Vente, on_delete=models.PROTECT, null=True, blank=True,
         related_name='paiements'
     )
 
     montant = models.DecimalField(
-        max_digits=12, decimal_places=2, 
+        max_digits=12, decimal_places=2,
         validators=[MinValueValidator(0)]
     )
     methode = models.CharField(max_length=20, choices=METHODES_PAIEMENT)
@@ -466,9 +534,14 @@ class Paiement(models.Model):
         verbose_name = "Paiement"
         verbose_name_plural = "Paiements"
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['facture', 'statut']),
-            models.Index(fields=['date_paiement']),
+            models.Index(fields=['reference'], name='paiement_reference_idx'),
+            models.Index(fields=['facture', 'statut'],
+                         name='paiement_facture_statut_idx'),
+            models.Index(fields=['date_paiement'], name='paiement_date_idx'),
+            models.Index(fields=['vente'], name='paiement_vente_idx'),
+            models.Index(fields=['client', '-date_paiement'],
+                         name='paiement_client_date_idx'),
+            models.Index(fields=['statut'], name='paiement_statut_idx'),
         ]
 
     def __str__(self):
@@ -534,7 +607,7 @@ class Paiement(models.Model):
                     agence=agence,
                     is_active=True
                 ).first()
-                
+
                 # 2. Si aucune caisse n'existe, la créer AUTOMATIQUEMENT
                 if not caisse:
                     caisse = Caisse.objects.create(
@@ -554,7 +627,7 @@ class Paiement(models.Model):
                         f"✅ Caisse automatique créée pour l'agence {agence.nom} "
                         f"(ID: {caisse.id})"
                     )
-                
+
                 # 3. S'assurer que cette caisse est par défaut
                 if not caisse.is_default:
                     caisse.is_default = True
@@ -581,7 +654,7 @@ class Paiement(models.Model):
                 libelle=f"Paiement {self.reference} - {self.client.nom if self.client else 'Client'}",
                 created_by=self.encaisse_par
             )
-            
+
             self.mouvement_tresorerie = mouvement
             logger.info(
                 f"✅ Mouvement de trésorerie créé pour le paiement {self.reference} "
@@ -589,7 +662,8 @@ class Paiement(models.Model):
             )
 
         except Exception as e:
-            logger.error(f"❌ Erreur lors de la création du mouvement: {str(e)}")
+            logger.error(
+                f"❌ Erreur lors de la création du mouvement: {str(e)}")
             raise ValidationError(
                 f"Erreur lors de la création du mouvement de trésorerie: {str(e)}"
             )
@@ -597,7 +671,7 @@ class Paiement(models.Model):
     def mettre_a_jour_facture(self):
         """Recompte le total payé de la facture"""
         from django.db.models import Sum
-        
+
         total_paye = self.facture.paiements.filter(
             statut='completed'
         ).aggregate(
@@ -621,7 +695,7 @@ class Paiement(models.Model):
     def mettre_a_jour_vente(self):
         """Recompte le total payé de la vente"""
         from django.db.models import Sum
-        
+
         total_paye_vente = self.vente.paiements.filter(
             statut='completed'
         ).aggregate(
@@ -631,7 +705,7 @@ class Paiement(models.Model):
         self.vente.montant_paye = total_paye_vente
         self.vente.montant_du = self.vente.total - total_paye_vente
         self.vente.est_paye = total_paye_vente >= self.vente.total
-        
+
         self.vente.save(
             update_fields=['montant_paye', 'montant_du', 'est_paye']
         )
