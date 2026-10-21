@@ -1,18 +1,29 @@
+# comptabilite/models.py
+"""
+Modèles pour l'application Comptabilité / Finance.
 
+✅ INDEX OPTIMISÉS pour requêtes 10 000+ lignes :
+- Ecriture : (agence, status, date), (status, -date), (-created)
+- LigneEcriture : (ecriture, compte), (compte, ecriture), (compte, lettrage)
+- FactureComptable : (agence, type, status), (agence, -date), (status, echeance), (client, status), (fournisseur, status)
+- Reglement : (agence, type, date), (facture), (client, type), (fournisseur, type)
+- SoldeCompte : (compte, agence, date), (agence, date), (-date)
+"""
 
 from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
+
 from users.models import CustomUser, Agence
 from produits.models import Product
 from sales.models import Vente, Facture, Paiement
 from purchases.models import PurchaseOrder, PurchaseReceipt
 from inventaire.models import Warehouse
 
+
 # ============================================================
 # PLAN COMPTABLE
 # ============================================================
-
 class PlanComptable(models.Model):
     """
     Plan comptable général
@@ -25,36 +36,60 @@ class PlanComptable(models.Model):
         ('produits', 'Produits'),
     )
 
-    code = models.CharField(max_length=20, unique=True, verbose_name="Code compte")
+    code = models.CharField(max_length=20, unique=True,
+                            verbose_name="Code compte")
     nom = models.CharField(max_length=200, verbose_name="Nom du compte")
-    type_compte = models.CharField(max_length=20, choices=TYPE_COMPTES, verbose_name="Type de compte")
-    parent = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, 
-                               related_name='sous_comptes', verbose_name="Compte parent")
+    type_compte = models.CharField(
+        max_length=20, choices=TYPE_COMPTES, verbose_name="Type de compte")
+    parent = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sous_comptes', verbose_name="Compte parent"
+    )
     niveau = models.IntegerField(default=1, verbose_name="Niveau")
-    
+
     # Pour la classification
-    classe = models.CharField(max_length=10, blank=True, null=True, verbose_name="Classe")
-    sous_classe = models.CharField(max_length=10, blank=True, null=True, verbose_name="Sous-classe")
-    
+    classe = models.CharField(
+        max_length=10, blank=True, null=True, verbose_name="Classe")
+    sous_classe = models.CharField(
+        max_length=10, blank=True, null=True, verbose_name="Sous-classe")
+
     # Solde
-    solde_normal = models.CharField(max_length=10, choices=(
-        ('debiteur', 'Débiteur'),
-        ('crediteur', 'Créditeur'),
-    ), default='debiteur', verbose_name="Solde normal")
-    
+    solde_normal = models.CharField(
+        max_length=10,
+        choices=(('debiteur', 'Débiteur'), ('crediteur', 'Créditeur')),
+        default='debiteur', verbose_name="Solde normal"
+    )
+
     is_active = models.BooleanField(default=True, verbose_name="Actif")
-    is_analytique = models.BooleanField(default=False, verbose_name="Compte analytique")
-    
-    description = models.TextField(blank=True, null=True, verbose_name="Description")
+    is_analytique = models.BooleanField(
+        default=False, verbose_name="Compte analytique")
+
+    description = models.TextField(
+        blank=True, null=True, verbose_name="Description")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, 
-                                   related_name='comptes_crees')
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='comptes_crees'
+    )
 
     class Meta:
         verbose_name = "Plan comptable"
         verbose_name_plural = "Plan comptable"
         ordering = ['code']
+        indexes = [
+            # ✅ Index existants (bons)
+            models.Index(fields=['code'], name='plan_code_idx'),
+            models.Index(fields=['type_compte'], name='plan_type_idx'),
+            models.Index(fields=['parent'], name='plan_parent_idx'),
+            # ✅ NOUVEAUX : filtrage fréquent
+            models.Index(fields=['is_active', 'type_compte'],
+                         name='plan_active_type_idx'),
+            models.Index(fields=['is_active', 'niveau'],
+                         name='plan_active_niveau_idx'),
+            models.Index(fields=['classe', 'is_active'],
+                         name='plan_classe_active_idx'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.nom}"
@@ -77,7 +112,6 @@ class PlanComptable(models.Model):
 # ============================================================
 # JOURNAUX
 # ============================================================
-
 class Journal(models.Model):
     """
     Journal comptable
@@ -93,17 +127,23 @@ class Journal(models.Model):
         ('immobilisations', 'Immobilisations'),
     )
 
-    code = models.CharField(max_length=10, unique=True, verbose_name="Code journal")
+    code = models.CharField(max_length=10, unique=True,
+                            verbose_name="Code journal")
     nom = models.CharField(max_length=100, verbose_name="Nom du journal")
-    type_journal = models.CharField(max_length=20, choices=TYPE_JOURNAUX, verbose_name="Type de journal")
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='journaux', 
-                               verbose_name="Agence")
-    
+    type_journal = models.CharField(
+        max_length=20, choices=TYPE_JOURNAUX, verbose_name="Type de journal")
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='journaux',
+        verbose_name="Agence"
+    )
+
     is_active = models.BooleanField(default=True, verbose_name="Actif")
-    is_default = models.BooleanField(default=False, verbose_name="Journal par défaut")
-    
-    description = models.TextField(blank=True, null=True, verbose_name="Description")
+    is_default = models.BooleanField(
+        default=False, verbose_name="Journal par défaut")
+
+    description = models.TextField(
+        blank=True, null=True, verbose_name="Description")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -112,20 +152,28 @@ class Journal(models.Model):
         verbose_name_plural = "Journaux"
         unique_together = ['agence', 'code']
         ordering = ['code']
+        indexes = [
+            models.Index(fields=['code'], name='journal_code_idx'),
+            models.Index(fields=['agence', 'is_active'],
+                         name='journal_ag_active_idx'),
+            models.Index(fields=['type_journal', 'is_active'],
+                         name='journal_type_active_idx'),
+            models.Index(fields=['is_default'], name='journal_default_idx'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.nom} ({self.agence.nom})"
 
     def save(self, *args, **kwargs):
         if self.is_default:
-            Journal.objects.filter(agence=self.agence, is_default=True).update(is_default=False)
+            Journal.objects.filter(
+                agence=self.agence, is_default=True).update(is_default=False)
         super().save(*args, **kwargs)
 
 
 # ============================================================
 # ÉCRITURES COMPTABLES
 # ============================================================
-
 class Ecriture(models.Model):
     """
     Écriture comptable principale
@@ -137,40 +185,62 @@ class Ecriture(models.Model):
         ('cloturee', 'Clôturée'),
     )
 
-    reference = models.CharField(max_length=50, unique=True, verbose_name="Référence")
-    journal = models.ForeignKey(Journal, on_delete=models.PROTECT, related_name='ecritures', 
-                               verbose_name="Journal")
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='ecritures', 
-                              verbose_name="Agence")
-    
-    date_ecriture = models.DateField(default=timezone.now, verbose_name="Date d'écriture")
-    date_comptable = models.DateField(default=timezone.now, verbose_name="Date comptable")
-    
+    reference = models.CharField(
+        max_length=50, unique=True, verbose_name="Référence")
+    journal = models.ForeignKey(
+        Journal, on_delete=models.PROTECT, related_name='ecritures',
+        verbose_name="Journal"
+    )
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='ecritures',
+        verbose_name="Agence"
+    )
+
+    date_ecriture = models.DateField(
+        default=timezone.now, verbose_name="Date d'écriture")
+    date_comptable = models.DateField(
+        default=timezone.now, verbose_name="Date comptable")
+
     libelle = models.CharField(max_length=200, verbose_name="Libellé")
-    piece_justificative = models.CharField(max_length=50, blank=True, null=True, 
-                                          verbose_name="Pièce justificative")
-    
+    piece_justificative = models.CharField(
+        max_length=50, blank=True, null=True,
+        verbose_name="Pièce justificative"
+    )
+
     # Lien vers les opérations source
-    source_type = models.CharField(max_length=50, blank=True, null=True, 
-                                  verbose_name="Type de source")
-    source_id = models.IntegerField(null=True, blank=True, verbose_name="ID source")
-    
+    source_type = models.CharField(
+        max_length=50, blank=True, null=True,
+        verbose_name="Type de source"
+    )
+    source_id = models.IntegerField(
+        null=True, blank=True, verbose_name="ID source")
+
     # Totaux
-    total_debit = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                     verbose_name="Total débit")
-    total_credit = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                      verbose_name="Total crédit")
-    
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='brouillon', 
-                             verbose_name="Statut")
-    
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, 
-                                   related_name='ecritures_crees', verbose_name="Créé par")
-    validated_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, 
-                                     blank=True, related_name='ecritures_validees', 
-                                     verbose_name="Validé par")
-    validated_at = models.DateTimeField(null=True, blank=True, verbose_name="Date validation")
-    
+    total_debit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total débit"
+    )
+    total_credit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total crédit"
+    )
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='brouillon',
+        verbose_name="Statut"
+    )
+
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='ecritures_crees', verbose_name="Créé par"
+    )
+    validated_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='ecritures_validees', verbose_name="Validé par"
+    )
+    validated_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="Date validation")
+
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -180,10 +250,19 @@ class Ecriture(models.Model):
         verbose_name_plural = "Écritures"
         ordering = ['-date_ecriture', '-created_at']
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['date_ecriture']),
-            models.Index(fields=['journal', 'status']),
-            models.Index(fields=['agence', 'date_ecriture']),
+            # ✅ Existants
+            models.Index(fields=['reference'], name='ecr_ref_idx'),
+            models.Index(fields=['date_ecriture'], name='ecr_date_idx'),
+            models.Index(fields=['journal', 'status'],
+                         name='ecr_journal_status_idx'),
+            models.Index(fields=['agence', 'date_ecriture'],
+                         name='ecr_agence_date_idx'),
+            # ✅ NOUVEAUX (critiques pour 10k+)
+            models.Index(
+                fields=['agence', 'status', 'date_ecriture'], name='ecr_ag_status_date_idx'),
+            models.Index(fields=['status', '-date_ecriture'],
+                         name='ecr_status_date_idx'),
+            models.Index(fields=['-created_at'], name='ecr_created_idx'),
         ]
 
     def __str__(self):
@@ -193,7 +272,8 @@ class Ecriture(models.Model):
         if not self.reference:
             from datetime import datetime
             prefix = f"ECR{datetime.now().strftime('%Y%m')}"
-            last = Ecriture.objects.filter(reference__startswith=prefix).order_by('-id').first()
+            last = Ecriture.objects.filter(
+                reference__startswith=prefix).order_by('-id').first()
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -219,30 +299,42 @@ class Ecriture(models.Model):
         self.save()
 
 
+# ============================================================
+# LIGNE ÉCRITURE (✅ INDEX CRUCIAL)
+# ============================================================
 class LigneEcriture(models.Model):
     """
     Ligne d'écriture comptable
     """
-    ecriture = models.ForeignKey(Ecriture, on_delete=models.CASCADE, related_name='lignes', 
-                                verbose_name="Écriture")
-    compte = models.ForeignKey(PlanComptable, on_delete=models.PROTECT, related_name='lignes', 
-                              verbose_name="Compte")
-    
-    debit = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                               verbose_name="Débit")
-    credit = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                verbose_name="Crédit")
-    
-    libelle = models.CharField(max_length=200, blank=True, null=True, verbose_name="Libellé ligne")
-    
+    ecriture = models.ForeignKey(
+        Ecriture, on_delete=models.CASCADE, related_name='lignes',
+        verbose_name="Écriture"
+    )
+    compte = models.ForeignKey(
+        PlanComptable, on_delete=models.PROTECT, related_name='lignes',
+        verbose_name="Compte"
+    )
+
+    debit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Débit")
+    credit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Crédit")
+
+    libelle = models.CharField(
+        max_length=200, blank=True, null=True, verbose_name="Libellé ligne")
+
     # Pour le lettrage
-    lettrage = models.CharField(max_length=50, blank=True, null=True, verbose_name="Lettrage")
-    date_lettrage = models.DateField(null=True, blank=True, verbose_name="Date lettrage")
-    
+    lettrage = models.CharField(
+        max_length=50, blank=True, null=True, verbose_name="Lettrage")
+    date_lettrage = models.DateField(
+        null=True, blank=True, verbose_name="Date lettrage")
+
     # Pour la comptabilité analytique
-    centre_analytique = models.CharField(max_length=50, blank=True, null=True, 
-                                        verbose_name="Centre analytique")
-    
+    centre_analytique = models.CharField(
+        max_length=50, blank=True, null=True,
+        verbose_name="Centre analytique"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -250,6 +342,16 @@ class LigneEcriture(models.Model):
         verbose_name = "Ligne d'écriture"
         verbose_name_plural = "Lignes d'écriture"
         ordering = ['id']
+        indexes = [
+            # ✅ CRUCIAL : prefetch 'ecriture__lignes' + filtre par compte
+            models.Index(fields=['ecriture', 'compte'],
+                         name='lig_ecr_cpt_idx'),
+            models.Index(fields=['compte', 'ecriture'],
+                         name='lig_cpt_ecr_idx'),
+            models.Index(fields=['compte', 'lettrage'],
+                         name='lig_cpt_lettr_idx'),
+            models.Index(fields=['ecriture', 'id'], name='lig_ecr_id_idx'),
+        ]
 
     def __str__(self):
         return f"{self.compte.code} - {self.compte.nom}: {self.montant}"
@@ -269,36 +371,47 @@ class LigneEcriture(models.Model):
     def clean(self):
         from django.core.exceptions import ValidationError
         if self.debit > 0 and self.credit > 0:
-            raise ValidationError("Une ligne ne peut pas avoir à la fois débit et crédit")
+            raise ValidationError(
+                "Une ligne ne peut pas avoir à la fois débit et crédit")
         if self.debit == 0 and self.credit == 0:
             raise ValidationError("Une ligne doit avoir un débit ou un crédit")
 
 
 # ============================================================
-# SOLDES
+# SOLDES (✅ INDEX COMPOSITES CRUCIAL)
 # ============================================================
-
 class SoldeCompte(models.Model):
     """
     Solde d'un compte à une date donnée
     """
-    compte = models.ForeignKey(PlanComptable, on_delete=models.PROTECT, related_name='soldes', 
-                              verbose_name="Compte")
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='soldes_comptes', 
-                              verbose_name="Agence")
-    
+    compte = models.ForeignKey(
+        PlanComptable, on_delete=models.PROTECT, related_name='soldes',
+        verbose_name="Compte"
+    )
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='soldes_comptes',
+        verbose_name="Agence"
+    )
+
     date_solde = models.DateField(verbose_name="Date du solde")
-    
-    debit = models.DecimalField(max_digits=15, decimal_places=2, default=0, verbose_name="Débit")
-    credit = models.DecimalField(max_digits=15, decimal_places=2, default=0, verbose_name="Crédit")
-    solde = models.DecimalField(max_digits=15, decimal_places=2, default=0, verbose_name="Solde")
-    
+
+    debit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Débit")
+    credit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Crédit")
+    solde = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Solde")
+
     # Mouvements de la période
-    debit_periode = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                       verbose_name="Débit période")
-    credit_periode = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                        verbose_name="Crédit période")
-    
+    debit_periode = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Débit période"
+    )
+    credit_periode = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Crédit période"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -307,6 +420,14 @@ class SoldeCompte(models.Model):
         verbose_name_plural = "Soldes de comptes"
         unique_together = ['compte', 'agence', 'date_solde']
         ordering = ['compte__code', '-date_solde']
+        indexes = [
+            # ✅ CRUCIAL : requêtes fréquentes sur les soldes
+            models.Index(fields=['compte', 'agence',
+                         'date_solde'], name='solde_cpt_ag_date_idx'),
+            models.Index(fields=['agence', 'date_solde'],
+                         name='solde_ag_date_idx'),
+            models.Index(fields=['-date_solde'], name='solde_date_desc_idx'),
+        ]
 
     def __str__(self):
         return f"{self.compte.code} - {self.date_solde}: {self.solde}"
@@ -321,9 +442,8 @@ class SoldeCompte(models.Model):
 
 
 # ============================================================
-# BALANCES ET ÉTATS
+# BALANCES
 # ============================================================
-
 class Balance(models.Model):
     """
     Balance comptable (générale, des comptes, etc.)
@@ -334,24 +454,35 @@ class Balance(models.Model):
         ('agee', 'Balance âgée'),
     )
 
-    reference = models.CharField(max_length=50, unique=True, verbose_name="Référence")
-    type_balance = models.CharField(max_length=20, choices=TYPE_BALANCE, default='generale',
-                                   verbose_name="Type de balance")
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='balances', 
-                              verbose_name="Agence")
-    
+    reference = models.CharField(
+        max_length=50, unique=True, verbose_name="Référence")
+    type_balance = models.CharField(
+        max_length=20, choices=TYPE_BALANCE, default='generale',
+        verbose_name="Type de balance"
+    )
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='balances',
+        verbose_name="Agence"
+    )
+
     date_debut = models.DateField(verbose_name="Date début")
     date_fin = models.DateField(verbose_name="Date fin")
-    
-    status = models.CharField(max_length=20, choices=(
-        ('brouillon', 'Brouillon'),
-        ('valide', 'Validée'),
-        ('archive', 'Archivée'),
-    ), default='brouillon', verbose_name="Statut")
-    
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, 
-                                   related_name='balances_crees', verbose_name="Créé par")
+
+    status = models.CharField(
+        max_length=20,
+        choices=(
+            ('brouillon', 'Brouillon'),
+            ('valide', 'Validée'),
+            ('archive', 'Archivée'),
+        ),
+        default='brouillon', verbose_name="Statut"
+    )
+
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='balances_crees', verbose_name="Créé par"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -359,6 +490,13 @@ class Balance(models.Model):
         verbose_name = "Balance"
         verbose_name_plural = "Balances"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['reference'], name='bal_ref_idx'),
+            models.Index(fields=['agence', 'status'],
+                         name='bal_ag_status_idx'),
+            models.Index(fields=['agence', '-date_fin'],
+                         name='bal_ag_date_idx'),
+        ]
 
     def __str__(self):
         return f"{self.reference} - {self.type_balance} ({self.date_debut} au {self.date_fin})"
@@ -367,7 +505,8 @@ class Balance(models.Model):
         if not self.reference:
             from datetime import datetime
             prefix = f"BAL{datetime.now().strftime('%Y%m')}"
-            last = Balance.objects.filter(reference__startswith=prefix).order_by('-id').first()
+            last = Balance.objects.filter(
+                reference__startswith=prefix).order_by('-id').first()
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -383,33 +522,47 @@ class LigneBalance(models.Model):
     """
     Ligne de balance
     """
-    balance = models.ForeignKey(Balance, on_delete=models.CASCADE, related_name='lignes', 
-                               verbose_name="Balance")
-    compte = models.ForeignKey(PlanComptable, on_delete=models.PROTECT, related_name='lignes_balance', 
-                              verbose_name="Compte")
-    
-    solde_initial_debit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
-    solde_initial_credit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
-    
-    mouvement_debit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
-    mouvement_credit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
-    
-    solde_final_debit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
-    solde_final_credit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    balance = models.ForeignKey(
+        Balance, on_delete=models.CASCADE, related_name='lignes',
+        verbose_name="Balance"
+    )
+    compte = models.ForeignKey(
+        PlanComptable, on_delete=models.PROTECT, related_name='lignes_balance',
+        verbose_name="Compte"
+    )
+
+    solde_initial_debit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0)
+    solde_initial_credit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0)
+
+    mouvement_debit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0)
+    mouvement_credit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0)
+
+    solde_final_debit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0)
+    solde_final_credit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0)
 
     class Meta:
         verbose_name = "Ligne de balance"
         verbose_name_plural = "Lignes de balance"
         ordering = ['compte__code']
+        indexes = [
+            models.Index(fields=['balance', 'compte'],
+                         name='lbal_bal_cpt_idx'),
+            models.Index(fields=['compte'], name='lbal_cpt_idx'),
+        ]
 
     def __str__(self):
         return f"{self.compte.code} - {self.compte.nom}"
 
 
 # ============================================================
-# FACTURES CLIENT/FOURNISSEUR (Comptabilité)
+# FACTURES COMPTABLES (✅ INDEX COMPOSITES)
 # ============================================================
-
 class FactureComptable(models.Model):
     """
     Facture comptable (client ou fournisseur)
@@ -428,62 +581,96 @@ class FactureComptable(models.Model):
         ('annulee', 'Annulée'),
     )
 
-    reference = models.CharField(max_length=50, unique=True, verbose_name="Référence")
-    type_facture = models.CharField(max_length=20, choices=TYPE_FACTURE, verbose_name="Type")
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='factures_comptables', 
-                              verbose_name="Agence")
-    
+    reference = models.CharField(
+        max_length=50, unique=True, verbose_name="Référence")
+    type_facture = models.CharField(
+        max_length=20, choices=TYPE_FACTURE, verbose_name="Type")
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='factures_comptables',
+        verbose_name="Agence"
+    )
+
     # Pour les clients
-    client = models.ForeignKey('sales.Client', on_delete=models.SET_NULL, null=True, blank=True,
-                              related_name='factures_comptables', verbose_name="Client")
-    
+    client = models.ForeignKey(
+        'sales.Client', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='factures_comptables', verbose_name="Client"
+    )
+
     # Pour les fournisseurs
-    fournisseur = models.ForeignKey('purchases.Supplier', on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='factures_comptables', verbose_name="Fournisseur")
-    
+    fournisseur = models.ForeignKey(
+        'purchases.Supplier', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='factures_comptables', verbose_name="Fournisseur"
+    )
+
     # Lien vers les opérations
-    vente = models.ForeignKey('sales.Vente', on_delete=models.SET_NULL, null=True, blank=True,
-                             related_name='factures_comptables', verbose_name="Vente")
-    achat = models.ForeignKey('purchases.PurchaseOrder', on_delete=models.SET_NULL, null=True, blank=True,
-                             related_name='factures_comptables', verbose_name="Achat")
-    
-    date_facture = models.DateField(default=timezone.now, verbose_name="Date facture")
+    vente = models.ForeignKey(
+        'sales.Vente', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='factures_comptables', verbose_name="Vente"
+    )
+    achat = models.ForeignKey(
+        'purchases.PurchaseOrder', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='factures_comptables', verbose_name="Achat"
+    )
+
+    date_facture = models.DateField(
+        default=timezone.now, verbose_name="Date facture")
     date_echeance = models.DateField(verbose_name="Date échéance")
-    
-    montant_ht = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                    verbose_name="Montant HT")
-    montant_tva = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                     verbose_name="Montant TVA")
-    montant_ttc = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                     verbose_name="Montant TTC")
-    
-    montant_paye = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                      verbose_name="Montant payé")
-    montant_restant = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                         verbose_name="Montant restant")
-    
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='brouillon',
-                             verbose_name="Statut")
-    
+
+    montant_ht = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Montant HT")
+    montant_tva = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Montant TVA")
+    montant_ttc = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Montant TTC")
+
+    montant_paye = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Montant payé")
+    montant_restant = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Montant restant")
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='brouillon',
+        verbose_name="Statut"
+    )
+
     # Rapprochement bancaire
-    date_rapprochement = models.DateField(null=True, blank=True, verbose_name="Date rapprochement")
+    date_rapprochement = models.DateField(
+        null=True, blank=True, verbose_name="Date rapprochement")
     rapproche = models.BooleanField(default=False, verbose_name="Rapproché")
-    
+
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                  related_name='factures_comptables_crees', verbose_name="Créé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='factures_comptables_crees', verbose_name="Créé par"
+    )
 
     class Meta:
         verbose_name = "Facture comptable"
         verbose_name_plural = "Factures comptables"
         ordering = ['-date_facture']
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['type_facture', 'status']),
-            models.Index(fields=['date_facture', 'date_echeance']),
+            # ✅ Existants
+            models.Index(fields=['reference'], name='fc_ref_idx'),
+            models.Index(fields=['type_facture', 'status'],
+                         name='fc_type_status_idx'),
+            models.Index(
+                fields=['date_facture', 'date_echeance'], name='fc_dates_idx'),
+            # ✅ NOUVEAUX (critiques)
+            models.Index(fields=['agence', 'type_facture',
+                         'status'], name='fc_ag_type_status_idx'),
+            models.Index(fields=['agence', '-date_facture'],
+                         name='fc_ag_date_idx'),
+            models.Index(fields=['status', 'date_echeance'],
+                         name='fc_status_echeance_idx'),
+            models.Index(fields=['client', 'status'],
+                         name='fc_client_status_idx'),
+            models.Index(fields=['fournisseur', 'status'],
+                         name='fc_fourn_status_idx'),
+            models.Index(fields=['rapproche', 'status'],
+                         name='fc_rapproche_status_idx'),
         ]
 
     def __str__(self):
@@ -497,7 +684,8 @@ class FactureComptable(models.Model):
                 prefix = f"FCL{datetime.now().strftime('%Y%m')}"
             else:
                 prefix = f"FOU{datetime.now().strftime('%Y%m')}"
-            last = FactureComptable.objects.filter(reference__startswith=prefix).order_by('-id').first()
+            last = FactureComptable.objects.filter(
+                reference__startswith=prefix).order_by('-id').first()
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -506,23 +694,22 @@ class FactureComptable(models.Model):
                     self.reference = f"{prefix}0001"
             else:
                 self.reference = f"{prefix}0001"
-        
+
         self.montant_restant = self.montant_ttc - self.montant_paye
-        
+
         if self.montant_paye >= self.montant_ttc:
             self.status = 'payee'
         elif self.montant_paye > 0:
             self.status = 'partielle'
         elif self.date_echeance < timezone.now().date():
             self.status = 'impayee'
-        
+
         super().save(*args, **kwargs)
 
 
 # ============================================================
-# RÈGLEMENTS
+# RÈGLEMENTS (✅ INDEX COMPOSITES)
 # ============================================================
-
 class Reglement(models.Model):
     """
     Règlement (paiement client ou fournisseur)
@@ -540,47 +727,78 @@ class Reglement(models.Model):
         ('autre', 'Autre'),
     )
 
-    reference = models.CharField(max_length=50, unique=True, verbose_name="Référence")
-    type_reglement = models.CharField(max_length=20, choices=TYPE_REGLEMENT, verbose_name="Type")
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='reglements', 
-                              verbose_name="Agence")
-    
+    reference = models.CharField(
+        max_length=50, unique=True, verbose_name="Référence")
+    type_reglement = models.CharField(
+        max_length=20, choices=TYPE_REGLEMENT, verbose_name="Type")
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='reglements',
+        verbose_name="Agence"
+    )
+
     # Client ou fournisseur
-    client = models.ForeignKey('sales.Client', on_delete=models.SET_NULL, null=True, blank=True,
-                              related_name='reglements', verbose_name="Client")
-    fournisseur = models.ForeignKey('purchases.Supplier', on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='reglements', verbose_name="Fournisseur")
-    
+    client = models.ForeignKey(
+        'sales.Client', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reglements', verbose_name="Client"
+    )
+    fournisseur = models.ForeignKey(
+        'purchases.Supplier', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reglements', verbose_name="Fournisseur"
+    )
+
     # Facture associée
-    facture = models.ForeignKey(FactureComptable, on_delete=models.SET_NULL, null=True, blank=True,
-                               related_name='reglements', verbose_name="Facture")
-    
-    montant = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)],
-                                 verbose_name="Montant")
-    mode_reglement = models.CharField(max_length=20, choices=MODE_REGLEMENT, verbose_name="Mode")
-    
-    date_reglement = models.DateField(default=timezone.now, verbose_name="Date règlement")
-    reference_externe = models.CharField(max_length=100, blank=True, null=True,
-                                        verbose_name="Référence externe")
-    
+    facture = models.ForeignKey(
+        FactureComptable, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reglements', verbose_name="Facture"
+    )
+
+    montant = models.DecimalField(
+        max_digits=15, decimal_places=2,
+        validators=[MinValueValidator(0)], verbose_name="Montant"
+    )
+    mode_reglement = models.CharField(
+        max_length=20, choices=MODE_REGLEMENT, verbose_name="Mode")
+
+    date_reglement = models.DateField(
+        default=timezone.now, verbose_name="Date règlement")
+    reference_externe = models.CharField(
+        max_length=100, blank=True, null=True,
+        verbose_name="Référence externe"
+    )
+
     # Rapprochement bancaire
-    date_rapprochement = models.DateField(null=True, blank=True, verbose_name="Date rapprochement")
+    date_rapprochement = models.DateField(
+        null=True, blank=True, verbose_name="Date rapprochement")
     rapproche = models.BooleanField(default=False, verbose_name="Rapproché")
-    
+
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                  related_name='reglements_crees', verbose_name="Créé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='reglements_crees', verbose_name="Créé par"
+    )
 
     class Meta:
         verbose_name = "Règlement"
         verbose_name_plural = "Règlements"
         ordering = ['-date_reglement']
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['type_reglement', 'date_reglement']),
+            # ✅ Existants
+            models.Index(fields=['reference'], name='reg_ref_idx'),
+            models.Index(fields=['type_reglement',
+                         'date_reglement'], name='reg_type_date_idx'),
+            # ✅ NOUVEAUX (critiques)
+            models.Index(fields=['agence', 'type_reglement',
+                         'date_reglement'], name='reg_ag_type_date_idx'),
+            models.Index(fields=['facture'], name='reg_facture_idx'),
+            models.Index(fields=['client', 'type_reglement'],
+                         name='reg_client_type_idx'),
+            models.Index(
+                fields=['fournisseur', 'type_reglement'], name='reg_fourn_type_idx'),
+            models.Index(fields=['rapproche', 'date_reglement'],
+                         name='reg_rapproche_date_idx'),
         ]
 
     def __str__(self):
@@ -594,7 +812,8 @@ class Reglement(models.Model):
                 prefix = f"RCL{datetime.now().strftime('%Y%m')}"
             else:
                 prefix = f"RFOU{datetime.now().strftime('%Y%m')}"
-            last = Reglement.objects.filter(reference__startswith=prefix).order_by('-id').first()
+            last = Reglement.objects.filter(
+                reference__startswith=prefix).order_by('-id').first()
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -607,9 +826,8 @@ class Reglement(models.Model):
 
 
 # ============================================================
-# TABLEAUX DE BORD FINANCIERS
+# INDICATEURS FINANCIERS
 # ============================================================
-
 class IndicateurFinancier(models.Model):
     """
     Indicateurs financiers (KPI)
@@ -624,23 +842,32 @@ class IndicateurFinancier(models.Model):
     )
 
     nom = models.CharField(max_length=100, verbose_name="Nom")
-    type_indicateur = models.CharField(max_length=20, choices=INDICATEUR_TYPES, verbose_name="Type")
+    type_indicateur = models.CharField(
+        max_length=20, choices=INDICATEUR_TYPES, verbose_name="Type")
     code = models.CharField(max_length=20, unique=True, verbose_name="Code")
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='indicateurs', 
-                              verbose_name="Agence")
-    
-    valeur = models.DecimalField(max_digits=15, decimal_places=2, default=0, verbose_name="Valeur")
-    valeur_previous = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                         verbose_name="Valeur précédente")
-    
-    date_calcul = models.DateField(default=timezone.now, verbose_name="Date calcul")
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='indicateurs',
+        verbose_name="Agence"
+    )
+
+    valeur = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0, verbose_name="Valeur")
+    valeur_previous = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Valeur précédente"
+    )
+
+    date_calcul = models.DateField(
+        default=timezone.now, verbose_name="Date calcul")
     periode_debut = models.DateField(verbose_name="Période début")
     periode_fin = models.DateField(verbose_name="Période fin")
-    
-    formule = models.TextField(blank=True, null=True, verbose_name="Formule de calcul")
-    interpretation = models.TextField(blank=True, null=True, verbose_name="Interprétation")
-    
+
+    formule = models.TextField(
+        blank=True, null=True, verbose_name="Formule de calcul")
+    interpretation = models.TextField(
+        blank=True, null=True, verbose_name="Interprétation")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -648,6 +875,12 @@ class IndicateurFinancier(models.Model):
         verbose_name = "Indicateur financier"
         verbose_name_plural = "Indicateurs financiers"
         ordering = ['type_indicateur', 'code']
+        indexes = [
+            models.Index(fields=['code'], name='ind_code_idx'),
+            models.Index(fields=['agence', 'type_indicateur'],
+                         name='ind_ag_type_idx'),
+            models.Index(fields=['-date_calcul'], name='ind_date_idx'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.nom}: {self.valeur}"
@@ -656,7 +889,6 @@ class IndicateurFinancier(models.Model):
 # ============================================================
 # CLÔTURE COMPTABLE
 # ============================================================
-
 class ClotureComptable(models.Model):
     """
     Clôture comptable (mensuelle, annuelle)
@@ -673,42 +905,65 @@ class ClotureComptable(models.Model):
         ('verrouillee', 'Verrouillée'),
     )
 
-    reference = models.CharField(max_length=50, unique=True, verbose_name="Référence")
-    type_cloture = models.CharField(max_length=20, choices=TYPE_CLOTURE, verbose_name="Type")
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='clotures', 
-                              verbose_name="Agence")
-    
+    reference = models.CharField(
+        max_length=50, unique=True, verbose_name="Référence")
+    type_cloture = models.CharField(
+        max_length=20, choices=TYPE_CLOTURE, verbose_name="Type")
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='clotures',
+        verbose_name="Agence"
+    )
+
     date_debut = models.DateField(verbose_name="Date début")
     date_fin = models.DateField(verbose_name="Date fin")
-    
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ouverte',
-                             verbose_name="Statut")
-    
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='ouverte',
+        verbose_name="Statut"
+    )
+
     # Opérations de clôture
-    total_debit = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                     verbose_name="Total débit")
-    total_credit = models.DecimalField(max_digits=15, decimal_places=2, default=0, 
-                                      verbose_name="Total crédit")
-    
-    resultat_exercice = models.DecimalField(max_digits=15, decimal_places=2, default=0,
-                                           verbose_name="Résultat exercice")
-    
-    closed_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-                                  related_name='clotures_fermees', verbose_name="Fermé par")
-    closed_at = models.DateTimeField(null=True, blank=True, verbose_name="Date fermeture")
-    
+    total_debit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total débit"
+    )
+    total_credit = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Total crédit"
+    )
+
+    resultat_exercice = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0,
+        verbose_name="Résultat exercice"
+    )
+
+    closed_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='clotures_fermees', verbose_name="Fermé par"
+    )
+    closed_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="Date fermeture")
+
     notes = models.TextField(blank=True, null=True, verbose_name="Notes")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                  related_name='clotures_crees', verbose_name="Créé par")
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='clotures_crees', verbose_name="Créé par"
+    )
 
     class Meta:
         verbose_name = "Clôture comptable"
         verbose_name_plural = "Clôtures comptables"
         ordering = ['-date_fin']
         unique_together = ['agence', 'date_debut', 'date_fin']
+        indexes = [
+            models.Index(fields=['reference'], name='clot_ref_idx'),
+            models.Index(fields=['agence', 'status'],
+                         name='clot_ag_status_idx'),
+            models.Index(fields=['-date_fin'], name='clot_date_idx'),
+        ]
 
     def __str__(self):
         return f"{self.reference} - {self.type_cloture} ({self.date_debut} au {self.date_fin})"
@@ -717,7 +972,8 @@ class ClotureComptable(models.Model):
         if not self.reference:
             from datetime import datetime
             prefix = f"CLOT{datetime.now().strftime('%Y%m')}"
-            last = ClotureComptable.objects.filter(reference__startswith=prefix).order_by('-id').first()
+            last = ClotureComptable.objects.filter(
+                reference__startswith=prefix).order_by('-id').first()
             if last:
                 try:
                     last_num = int(last.reference.replace(prefix, ''))
@@ -732,7 +988,6 @@ class ClotureComptable(models.Model):
 # ============================================================
 # ANALYSE FINANCIÈRE
 # ============================================================
-
 class AnalyseFinanciere(models.Model):
     """
     Analyse financière (ratio, tendances, etc.)
@@ -744,24 +999,34 @@ class AnalyseFinanciere(models.Model):
         ('prevision', 'Prévision'),
     )
 
-    reference = models.CharField(max_length=50, unique=True, verbose_name="Référence")
-    type_analyse = models.CharField(max_length=20, choices=ANALYSE_TYPES, verbose_name="Type")
-    
-    agence = models.ForeignKey(Agence, on_delete=models.PROTECT, related_name='analyses', 
-                              verbose_name="Agence")
-    
+    reference = models.CharField(
+        max_length=50, unique=True, verbose_name="Référence")
+    type_analyse = models.CharField(
+        max_length=20, choices=ANALYSE_TYPES, verbose_name="Type")
+
+    agence = models.ForeignKey(
+        Agence, on_delete=models.PROTECT, related_name='analyses',
+        verbose_name="Agence"
+    )
+
     titre = models.CharField(max_length=200, verbose_name="Titre")
-    description = models.TextField(blank=True, null=True, verbose_name="Description")
-    
-    donnees = models.JSONField(default=dict, verbose_name="Données de l'analyse")
-    resultat = models.JSONField(default=dict, verbose_name="Résultat de l'analyse")
-    
+    description = models.TextField(
+        blank=True, null=True, verbose_name="Description")
+
+    donnees = models.JSONField(
+        default=dict, verbose_name="Données de l'analyse")
+    resultat = models.JSONField(
+        default=dict, verbose_name="Résultat de l'analyse")
+
     date_debut = models.DateField(verbose_name="Date début")
     date_fin = models.DateField(verbose_name="Date fin")
-    date_analyse = models.DateField(default=timezone.now, verbose_name="Date analyse")
-    
-    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True,
-                                  related_name='analyses_crees', verbose_name="Créé par")
+    date_analyse = models.DateField(
+        default=timezone.now, verbose_name="Date analyse")
+
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True,
+        related_name='analyses_crees', verbose_name="Créé par"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -769,6 +1034,12 @@ class AnalyseFinanciere(models.Model):
         verbose_name = "Analyse financière"
         verbose_name_plural = "Analyses financières"
         ordering = ['-date_analyse']
+        indexes = [
+            models.Index(fields=['reference'], name='ana_ref_idx'),
+            models.Index(fields=['agence', 'type_analyse'],
+                         name='ana_ag_type_idx'),
+            models.Index(fields=['-date_analyse'], name='ana_date_idx'),
+        ]
 
     def __str__(self):
         return f"{self.reference} - {self.titre}"

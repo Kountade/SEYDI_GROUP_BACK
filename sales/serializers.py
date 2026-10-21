@@ -8,8 +8,13 @@ from django.utils import timezone
 from .models import *
 from produits.serializers import ProductListSerializer
 from users.serializers import UserSerializer, AgenceSimpleSerializer
-from inventaire.models import Lot
-from inventaire.serializers import LotListSerializer
+
+# ✅ SUPPRIMÉ : import au niveau module qui causait le cycle
+# from inventaire.models import Lot
+# from inventaire.serializers import LotListSerializer
+#
+# ✅ Ces imports sont maintenant faits LOCALEMENT dans les méthodes
+#    qui en ont besoin (voir VenteItemSerializer, VenteCreateSerializer)
 
 
 # ============================================================
@@ -85,7 +90,6 @@ class ClientDetailSerializer(serializers.ModelSerializer):
     def get_ventes(self, obj):
         qs = getattr(obj, '_ventes_prefetched', None)
         if qs is None:
-            # fallback : on charge seulement 20 dernières pour le détail
             qs = (obj.ventes
                   .select_related('agence', 'client', 'vendeur')
                   .order_by('-date_vente')[:20])
@@ -135,6 +139,12 @@ class ClientDetailSerializer(serializers.ModelSerializer):
 # VENTE ITEM
 # ============================================================
 class VenteItemSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour les lignes de vente.
+
+    ✅ IMPORT LOCAL : `Lot` et `LotListSerializer` sont importés
+       dans les méthodes pour éviter le cycle `inventaire` ↔ `sales`.
+    """
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_reference = serializers.CharField(
         source='product.reference', read_only=True)
@@ -208,6 +218,11 @@ class VenteDetailSerializer(serializers.ModelSerializer):
 # VENTE CREATE (avec gestion des lots)
 # ============================================================
 class VenteCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer pour la création d'une vente.
+
+    ✅ IMPORT LOCAL : `Lot` importé dans `validate()` et `create()`.
+    """
     items = VenteItemSerializer(many=True, write_only=True)
     client_id = serializers.IntegerField(required=False, allow_null=True)
 
@@ -231,7 +246,9 @@ class VenteCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"agence": "L'agence est obligatoire"})
 
-        from inventaire.models import get_default_warehouse
+        # ✅ Import local pour éviter le cycle
+        from inventaire.models import get_default_warehouse, Lot
+
         warehouse = get_default_warehouse(agence)
         if not warehouse:
             raise serializers.ValidationError(

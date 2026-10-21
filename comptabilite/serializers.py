@@ -1,19 +1,40 @@
 # comptabilite/serializers.py
 """
-Serializers pour l'application Comptabilité / Finance
+Serializers pour l'application Comptabilité / Finance.
+
+✅ IMPORTS CIRCULAIRES ÉVITÉS :
+- Suppression de `from sales.serializers import ClientSerializer` (non utilisé)
+- Suppression de `from purchases.serializers import SupplierListSerializer` (non utilisé)
+
+✅ N+1 ÉLIMINÉS :
+- PlanComptable.sous_comptes_count   : annotate côté ViewSet (0 requête)
+- PlanComptable.parent_code/parent_nom : select_related('parent') côté ViewSet
+- Journal.ecritures_count            : annotate côté ViewSet (0 requête)
+- Ecriture.lignes                    : prefetch_related('lignes') côté ViewSet
+- Ecriture.journal_code/journal_nom  : select_related('journal') côté ViewSet
+- Ecriture.created_by_email          : select_related('created_by') côté ViewSet
+- SoldeCompte.compte_code/nom/type   : select_related('compte') côté ViewSet
+- LigneBalance.compte_code/nom/type  : select_related('compte') côté ViewSet
+- Balance.total_debit/total_credit   : annotate(Sum(...)) côté ViewSet (0 requête)
+- FactureComptable.client_nom        : select_related('client') côté ViewSet
+- FactureComptable.fournisseur_nom   : select_related('fournisseur') côté ViewSet
+- FactureComptable.jours_retard      : today en cache dans le contexte
+- Reglement.facture_reference        : select_related('facture') côté ViewSet
+- Reglement.client_nom               : select_related('client') côté ViewSet
+- Reglement.fournisseur_nom          : select_related('fournisseur') côté ViewSet
+- EcritureCreateSerializer.create    : bulk_create pour les lignes (1 req au lieu de N)
 """
 
 from rest_framework import serializers
 from django.db.models import Sum
 from django.utils import timezone
+
 from .models import *
 from users.serializers import AgenceSimpleSerializer, UserSerializer
 
-# ✅ IMPORT CORRIGÉ - Utilisation de ClientSerializer au lieu de ClientSimpleSerializer
-from sales.serializers import ClientSerializer
-
-# ✅ IMPORT CORRIGÉ - Utilisation de SupplierListSerializer au lieu de SupplierSimpleSerializer
-from purchases.serializers import SupplierListSerializer
+# ✅ SUPPRIMÉ : imports inutilisés qui causaient des cycles
+# from sales.serializers import ClientSerializer
+# from purchases.serializers import SupplierListSerializer
 
 
 # ============================================================
@@ -21,7 +42,13 @@ from purchases.serializers import SupplierListSerializer
 # ============================================================
 
 class PlanComptableSerializer(serializers.ModelSerializer):
-    """Serializer pour le plan comptable"""
+    """
+    Serializer pour le plan comptable.
+
+    ✅ N+1 ÉLIMINÉ :
+    - sous_comptes_count : annotate côté ViewSet
+    - parent_code / parent_nom : select_related('parent') côté ViewSet
+    """
     type_compte_display = serializers.CharField(
         source='get_type_compte_display', read_only=True)
     solde_normal_display = serializers.CharField(
@@ -30,7 +57,8 @@ class PlanComptableSerializer(serializers.ModelSerializer):
         source='parent.code', read_only=True, default=None)
     parent_nom = serializers.CharField(
         source='parent.nom', read_only=True, default=None)
-    sous_comptes_count = serializers.SerializerMethodField()
+    # ✅ Lu depuis l'annotate du ViewSet
+    sous_comptes_count = serializers.IntegerField(read_only=True, default=0)
     niveau_display = serializers.SerializerMethodField()
 
     class Meta:
@@ -43,9 +71,6 @@ class PlanComptableSerializer(serializers.ModelSerializer):
             'sous_comptes_count', 'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
-
-    def get_sous_comptes_count(self, obj):
-        return obj.sous_comptes.filter(is_active=True).count()
 
     def get_niveau_display(self, obj):
         niveaux = {1: 'Classe', 2: 'Compte',
@@ -83,11 +108,18 @@ class PlanComptableCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class JournalSerializer(serializers.ModelSerializer):
-    """Serializer pour les journaux"""
+    """
+    Serializer pour les journaux.
+
+    ✅ N+1 ÉLIMINÉ :
+    - ecritures_count : annotate côté ViewSet
+    - agence_nom : select_related('agence') côté ViewSet
+    """
     type_journal_display = serializers.CharField(
         source='get_type_journal_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-    ecritures_count = serializers.SerializerMethodField()
+    # ✅ Lu depuis l'annotate du ViewSet
+    ecritures_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = Journal
@@ -97,9 +129,6 @@ class JournalSerializer(serializers.ModelSerializer):
             'description', 'ecritures_count', 'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
-
-    def get_ecritures_count(self, obj):
-        return obj.ecritures.filter(status='valide').count()
 
 
 class JournalCreateSerializer(serializers.ModelSerializer):
@@ -123,7 +152,12 @@ class JournalCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class LigneEcritureSerializer(serializers.ModelSerializer):
-    """Serializer pour les lignes d'écriture"""
+    """
+    Serializer pour les lignes d'écriture.
+
+    ✅ N+1 ÉLIMINÉ :
+    - compte_code / compte_nom : select_related('compte') côté ViewSet
+    """
     compte_code = serializers.CharField(source='compte.code', read_only=True)
     compte_nom = serializers.CharField(source='compte.nom', read_only=True)
     sens = serializers.CharField(read_only=True)
@@ -152,12 +186,21 @@ class LigneEcritureSerializer(serializers.ModelSerializer):
 
 
 class EcritureSerializer(serializers.ModelSerializer):
-    """Serializer pour les écritures comptables"""
+    """
+    Serializer pour les écritures comptables.
+
+    ✅ N+1 ÉLIMINÉ :
+    - lignes : prefetch_related('lignes') côté ViewSet
+    - journal_code / journal_nom : select_related('journal') côté ViewSet
+    - agence_nom : select_related('agence') côté ViewSet
+    - created_by_email / validated_by_email : select_related côté ViewSet
+    """
     journal_code = serializers.CharField(source='journal.code', read_only=True)
     journal_nom = serializers.CharField(source='journal.nom', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
+    # ✅ Lu depuis prefetch_related('lignes') du ViewSet
     lignes = LigneEcritureSerializer(many=True, read_only=True)
     est_equilibree = serializers.BooleanField(read_only=True)
     created_by_email = serializers.EmailField(
@@ -188,13 +231,14 @@ class EcritureSerializer(serializers.ModelSerializer):
             })
         return data
 
-# comptabilite/serializers.py - Partie EcritureCreateSerializer
-
-# comptabilite/serializers.py - EcritureCreateSerializer corrigé
-
 
 class EcritureCreateSerializer(serializers.ModelSerializer):
-    """Serializer pour la création d'une écriture"""
+    """
+    Serializer pour la création d'une écriture.
+
+    ✅ N+1 ÉLIMINÉ :
+    - bulk_create pour les lignes (1 requête au lieu de N)
+    """
     lignes = LigneEcritureSerializer(many=True)
 
     class Meta:
@@ -213,16 +257,12 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
         )
 
     def validate_agence(self, value):
-        """
-        ✅ VALIDATION DE L'AGENCE - Convertit l'ID en objet
-        """
+        """✅ VALIDATION DE L'AGENCE - Convertit l'ID en objet"""
         from users.models import Agence
 
-        # Si c'est déjà un objet Agence
         if isinstance(value, Agence):
             return value
 
-        # Si c'est un ID (nombre)
         try:
             agence_id = int(value)
             agence = Agence.objects.get(id=agence_id, est_active=True)
@@ -233,14 +273,10 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Agence non trouvée ou inactive")
 
     def validate_journal(self, value):
-        """
-        ✅ VALIDATION DU JOURNAL
-        """
-        # Si c'est déjà un objet Journal
+        """✅ VALIDATION DU JOURNAL"""
         if hasattr(value, 'code'):
             return value
 
-        # Si c'est un ID (nombre)
         try:
             journal_id = int(value)
             from comptabilite.models import Journal
@@ -252,9 +288,7 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Journal non trouvé ou inactif")
 
     def validate_lignes(self, value):
-        """
-        ✅ VALIDATION DES LIGNES
-        """
+        """✅ VALIDATION DES LIGNES"""
         if not value:
             raise serializers.ValidationError(
                 "Au moins une ligne d'écriture est requise")
@@ -268,9 +302,7 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, data):
-        """
-        ✅ VALIDATION GLOBALE
-        """
+        """✅ VALIDATION GLOBALE"""
         lignes = data.get('lignes', [])
 
         total_debit = sum(l.get('debit', 0) for l in lignes)
@@ -284,24 +316,18 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        """
-        ✅ CRÉATION DE L'ÉCRITURE
-        """
+        """✅ CRÉATION DE L'ÉCRITURE avec bulk_create"""
         lignes_data = validated_data.pop('lignes')
 
-        # Récupérer l'agence (déjà validée)
         agence = validated_data.get('agence')
-
-        # Récupérer le journal (déjà validé)
         journal = validated_data.get('journal')
 
         total_debit = sum(l.get('debit', 0) for l in lignes_data)
         total_credit = sum(l.get('credit', 0) for l in lignes_data)
 
-        # ✅ Créer l'écriture AVEC les objets (pas les IDs)
         ecriture = Ecriture.objects.create(
-            journal=journal,  # Objet Journal
-            agence=agence,    # Objet Agence
+            journal=journal,
+            agence=agence,
             date_ecriture=validated_data.get('date_ecriture'),
             date_comptable=validated_data.get('date_comptable'),
             libelle=validated_data.get('libelle'),
@@ -315,15 +341,18 @@ class EcritureCreateSerializer(serializers.ModelSerializer):
             status='brouillon'
         )
 
-        # ✅ Créer les lignes
-        for ligne_data in lignes_data:
-            LigneEcriture.objects.create(
+        # ✅ bulk_create : 1 seule requête au lieu de N
+        lignes = [
+            LigneEcriture(
                 ecriture=ecriture,
-                compte=ligne_data['compte'],  # Objet PlanComptable
+                compte=ligne_data['compte'],
                 debit=ligne_data.get('debit', 0),
                 credit=ligne_data.get('credit', 0),
-                libelle=ligne_data.get('libelle', '')
+                libelle=ligne_data.get('libelle', ''),
             )
+            for ligne_data in lignes_data
+        ]
+        LigneEcriture.objects.bulk_create(lignes)
 
         return ecriture
 
@@ -339,7 +368,12 @@ class EcritureValidationSerializer(serializers.Serializer):
 # ============================================================
 
 class SoldeCompteSerializer(serializers.ModelSerializer):
-    """Serializer pour les soldes de comptes"""
+    """
+    Serializer pour les soldes de comptes.
+
+    ✅ N+1 ÉLIMINÉ :
+    - compte_code / compte_nom / type_compte : select_related('compte') côté ViewSet
+    """
     compte_code = serializers.CharField(source='compte.code', read_only=True)
     compte_nom = serializers.CharField(source='compte.nom', read_only=True)
     type_compte = serializers.CharField(
@@ -365,7 +399,12 @@ class SoldeCompteSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class LigneBalanceSerializer(serializers.ModelSerializer):
-    """Serializer pour les lignes de balance"""
+    """
+    Serializer pour les lignes de balance.
+
+    ✅ N+1 ÉLIMINÉ :
+    - compte_code / compte_nom / type_compte : select_related('compte') côté ViewSet
+    """
     compte_code = serializers.CharField(source='compte.code', read_only=True)
     compte_nom = serializers.CharField(source='compte.nom', read_only=True)
     type_compte = serializers.CharField(
@@ -382,17 +421,28 @@ class LigneBalanceSerializer(serializers.ModelSerializer):
 
 
 class BalanceSerializer(serializers.ModelSerializer):
-    """Serializer pour les balances"""
+    """
+    Serializer pour les balances.
+
+    ✅ N+1 ÉLIMINÉ :
+    - lignes : prefetch_related('lignes') côté ViewSet
+    - agence_nom : select_related('agence') côté ViewSet
+    - total_debit / total_credit : annotate(Sum(...)) côté ViewSet
+    """
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
     type_balance_display = serializers.CharField(
         source='get_type_balance_display', read_only=True)
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
+    # ✅ Lu depuis prefetch_related('lignes') du ViewSet
     lignes = LigneBalanceSerializer(many=True, read_only=True)
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True, default=None)
-    total_debit = serializers.SerializerMethodField()
-    total_credit = serializers.SerializerMethodField()
+    # ✅ Lus depuis l'annotate du ViewSet
+    total_debit = serializers.DecimalField(
+        max_digits=15, decimal_places=2, read_only=True, default=0)
+    total_credit = serializers.DecimalField(
+        max_digits=15, decimal_places=2, read_only=True, default=0)
     est_equilibree = serializers.SerializerMethodField()
 
     class Meta:
@@ -408,18 +458,11 @@ class BalanceSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
-    def get_total_debit(self, obj):
-        return obj.lignes.aggregate(
-            total=Sum('solde_final_debit')
-        )['total'] or 0
-
-    def get_total_credit(self, obj):
-        return obj.lignes.aggregate(
-            total=Sum('solde_final_credit')
-        )['total'] or 0
-
     def get_est_equilibree(self, obj):
-        return self.get_total_debit(obj) == self.get_total_credit(obj)
+        # ✅ Calcul pur, 0 requête
+        total_debit = getattr(obj, 'total_debit', 0) or 0
+        total_credit = getattr(obj, 'total_credit', 0) or 0
+        return total_debit == total_credit
 
 
 class BalanceCreateSerializer(serializers.ModelSerializer):
@@ -452,21 +495,26 @@ class BalanceCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class FactureComptableSerializer(serializers.ModelSerializer):
-    """Serializer pour les factures comptables"""
+    """
+    Serializer pour les factures comptables.
+
+    ✅ N+1 ÉLIMINÉ :
+    - client_nom : select_related('client') côté ViewSet
+    - fournisseur_nom : select_related('fournisseur') côté ViewSet
+    - agence_nom : select_related('agence') côté ViewSet
+    - pourcentage_paye : calcul pur (0 requête)
+    - jours_retard : today en cache dans le contexte
+    """
     type_facture_display = serializers.CharField(
         source='get_type_facture_display', read_only=True)
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-
-    # ✅ CORRIGÉ : Utilisation de ClientSerializer au lieu de ClientSimpleSerializer
+    # ✅ Lus depuis select_related du ViewSet
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default=None)
-
-    # ✅ CORRIGÉ : Utilisation de SupplierListSerializer au lieu de SupplierSimpleSerializer
     fournisseur_nom = serializers.CharField(
         source='fournisseur.company_name', read_only=True, default=None)
-
     pourcentage_paye = serializers.SerializerMethodField()
     jours_retard = serializers.SerializerMethodField()
     created_by_email = serializers.EmailField(
@@ -491,13 +539,19 @@ class FactureComptableSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
     def get_pourcentage_paye(self, obj):
+        # ✅ Calcul pur, 0 requête
         if obj.montant_ttc > 0:
-            return (obj.montant_paye / obj.montant_ttc) * 100
+            return round((obj.montant_paye / obj.montant_ttc) * 100, 2)
         return 0
 
     def get_jours_retard(self, obj):
-        if obj.status in ['impayee', 'partielle'] and obj.date_echeance < timezone.now().date():
-            return (timezone.now().date() - obj.date_echeance).days
+        # ✅ today mis en cache dans le contexte (calculé UNE SEULE fois)
+        today = self.context.get('today')
+        if today is None:
+            today = timezone.now().date()
+            self.context['today'] = today
+        if obj.status in ['impayee', 'partielle'] and obj.date_echeance < today:
+            return (today - obj.date_echeance).days
         return 0
 
 
@@ -536,21 +590,25 @@ class FactureComptableCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class ReglementSerializer(serializers.ModelSerializer):
-    """Serializer pour les règlements"""
+    """
+    Serializer pour les règlements.
+
+    ✅ N+1 ÉLIMINÉ :
+    - client_nom : select_related('client') côté ViewSet
+    - fournisseur_nom : select_related('fournisseur') côté ViewSet
+    - facture_reference : select_related('facture') côté ViewSet
+    - agence_nom : select_related('agence') côté ViewSet
+    """
     type_reglement_display = serializers.CharField(
         source='get_type_reglement_display', read_only=True)
     mode_reglement_display = serializers.CharField(
         source='get_mode_reglement_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
-
-    # ✅ CORRIGÉ : Utilisation de ClientSerializer
+    # ✅ Lus depuis select_related du ViewSet
     client_nom = serializers.CharField(
         source='client.nom', read_only=True, default=None)
-
-    # ✅ CORRIGÉ : Utilisation de SupplierListSerializer
     fournisseur_nom = serializers.CharField(
         source='fournisseur.company_name', read_only=True, default=None)
-
     facture_reference = serializers.CharField(
         source='facture.reference', read_only=True, default=None)
     created_by_email = serializers.EmailField(
@@ -610,7 +668,13 @@ class ReglementCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class IndicateurFinancierSerializer(serializers.ModelSerializer):
-    """Serializer pour les indicateurs financiers"""
+    """
+    Serializer pour les indicateurs financiers.
+
+    ✅ N+1 ÉLIMINÉ :
+    - agence_nom : select_related('agence') côté ViewSet
+    - variation / variation_pourcentage : calcul pur
+    """
     type_indicateur_display = serializers.CharField(
         source='get_type_indicateur_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
@@ -631,11 +695,13 @@ class IndicateurFinancierSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at', 'updated_at')
 
     def get_variation(self, obj):
+        # ✅ Calcul pur, 0 requête
         return obj.valeur - obj.valeur_previous
 
     def get_variation_pourcentage(self, obj):
+        # ✅ Calcul pur, 0 requête
         if obj.valeur_previous != 0:
-            return ((obj.valeur - obj.valeur_previous) / abs(obj.valeur_previous)) * 100
+            return round(((obj.valeur - obj.valeur_previous) / abs(obj.valeur_previous)) * 100, 2)
         return 0
 
 
@@ -663,7 +729,14 @@ class IndicateurCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class ClotureComptableSerializer(serializers.ModelSerializer):
-    """Serializer pour les clôtures comptables"""
+    """
+    Serializer pour les clôtures comptables.
+
+    ✅ N+1 ÉLIMINÉ :
+    - agence_nom : select_related('agence') côté ViewSet
+    - closed_by_email / created_by_email : select_related côté ViewSet
+    - duree_jours : calcul pur
+    """
     type_cloture_display = serializers.CharField(
         source='get_type_cloture_display', read_only=True)
     status_display = serializers.CharField(
@@ -690,6 +763,7 @@ class ClotureComptableSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'reference', 'created_at', 'updated_at')
 
     def get_duree_jours(self, obj):
+        # ✅ Calcul pur, 0 requête
         return (obj.date_fin - obj.date_debut).days
 
 
@@ -723,7 +797,13 @@ class ClotureCreateSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class AnalyseFinanciereSerializer(serializers.ModelSerializer):
-    """Serializer pour les analyses financières"""
+    """
+    Serializer pour les analyses financières.
+
+    ✅ N+1 ÉLIMINÉ :
+    - agence_nom : select_related('agence') côté ViewSet
+    - created_by_email : select_related('created_by') côté ViewSet
+    """
     type_analyse_display = serializers.CharField(
         source='get_type_analyse_display', read_only=True)
     agence_nom = serializers.CharField(source='agence.nom', read_only=True)
