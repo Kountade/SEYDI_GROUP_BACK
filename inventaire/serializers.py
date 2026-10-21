@@ -26,6 +26,29 @@ class WarehouseSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class WarehouseListSerializer(serializers.ModelSerializer):
+    """✅ Serializer allégé pour les listes (évite le COUNT N+1)."""
+    agence_nom = serializers.CharField(source='agence.nom', read_only=True)
+    agence_id = serializers.IntegerField(source='agence.id', read_only=True)
+    manager_name = serializers.CharField(
+        source='manager.email', read_only=True)
+    warehouse_type_display = serializers.CharField(
+        source='get_warehouse_type_display', read_only=True
+    )
+    locations_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Warehouse
+        fields = (
+            'id', 'code', 'name', 'warehouse_type', 'warehouse_type_display',
+            'agence', 'agence_id', 'agence_nom',
+            'address', 'city', 'postal_code', 'country',
+            'phone', 'email', 'manager', 'manager_name',
+            'is_active', 'is_default', 'locations_count',
+            'created_at', 'updated_at',
+        )
+
+
 class WarehouseDetailSerializer(serializers.ModelSerializer):
     locations = serializers.SerializerMethodField()
     manager = UserSerializer(read_only=True)
@@ -110,7 +133,6 @@ class StockMovementCreateSerializer(serializers.ModelSerializer):
                             'movement_date', 'created_by')
 
     def validate(self, data):
-        # Vérifier les sorties et transferts
         if data.get('movement_type') in ['out', 'transfer']:
             product = data.get('product')
             quantity = data.get('quantity', 0)
@@ -118,8 +140,6 @@ class StockMovementCreateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     f"Stock insuffisant. Disponible: {product.stock_quantity}"
                 )
-
-        # Vérifier que les entrepôts source/destination sont différents
         if data.get('movement_type') == 'transfer':
             from_wh = data.get('from_warehouse')
             to_wh = data.get('to_warehouse')
@@ -192,8 +212,7 @@ class TransferCreateSerializer(serializers.ModelSerializer):
             )
         if not items_data:
             raise serializers.ValidationError(
-                {"items": "Au moins un article est requis"}
-            )
+                {"items": "Au moins un article est requis"})
 
         for i, item in enumerate(items_data):
             if not item.get('product'):
@@ -241,8 +260,7 @@ class TransferListSerializer(serializers.ModelSerializer):
         source='get_status_display', read_only=True)
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True)
-    items_count = serializers.IntegerField(
-        source='items.count', read_only=True)
+    items_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = Transfer
@@ -319,7 +337,14 @@ class InventoryCountCreateSerializer(serializers.ModelSerializer):
         inventory = InventoryCount.objects.create(**validated_data)
         for item_data in items_data:
             product = item_data['product']
-            item_data['unit_price'] = product.purchase_price
+            # ✅ Prix depuis ProductPricing (plus de purchase_price sur Product)
+            from produits.models import ProductPricing
+            pricing = ProductPricing.objects.filter(
+                product=product,
+                warehouse=inventory.warehouse,
+                is_current=True,
+            ).first()
+            item_data['unit_price'] = pricing.purchase_price if pricing else 0
             InventoryCountItem.objects.create(inventory=inventory, **item_data)
         inventory.total_items = inventory.items.count()
         inventory.total_differences = inventory.items.filter(
@@ -347,8 +372,7 @@ class StockAlertSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(
         source='warehouse.name', read_only=True)
     alert_type_display = serializers.CharField(
-        source='get_alert_type_display', read_only=True
-    )
+        source='get_alert_type_display', read_only=True)
     status_display = serializers.CharField(
         source='get_status_display', read_only=True)
 
@@ -368,8 +392,7 @@ class LotListSerializer(serializers.ModelSerializer):
     location_code = serializers.CharField(
         source='location.code', read_only=True)
     quality_status_display = serializers.CharField(
-        source='get_quality_status_display', read_only=True
-    )
+        source='get_quality_status_display', read_only=True)
 
     class Meta:
         model = Lot
@@ -407,8 +430,7 @@ class LotCreateSerializer(serializers.ModelSerializer):
     def validate_quantity(self, value):
         if value is None or value <= 0:
             raise serializers.ValidationError(
-                "La quantité doit être supérieure à 0"
-            )
+                "La quantité doit être supérieure à 0")
         return value
 
     def validate(self, data):
@@ -417,19 +439,16 @@ class LotCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"warehouse": "L'entrepôt sélectionné est inactif"}
             )
-
         expiry = data.get('expiry_date')
         if expiry and expiry < timezone.now().date():
             raise serializers.ValidationError(
                 {"expiry_date": "La date d'expiration doit être future"}
             )
-
         mfg = data.get('manufacturing_date')
         if mfg and expiry and mfg >= expiry:
             raise serializers.ValidationError(
                 {"expiry_date": "La date d'expiration doit être après la date de fabrication"}
             )
-
         lot_number = data.get('lot_number')
         if lot_number:
             qs = Lot.objects.filter(lot_number=lot_number)
@@ -439,7 +458,6 @@ class LotCreateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"lot_number": f"Le numéro de lot '{lot_number}' existe déjà"}
                 )
-
         return data
 
 

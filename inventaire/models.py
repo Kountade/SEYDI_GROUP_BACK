@@ -62,6 +62,12 @@ class Warehouse(models.Model):
                 name='unique_default_warehouse_per_agence'
             ),
         ]
+        indexes = [
+            models.Index(fields=['agence', 'is_active'],
+                         name='wh_agence_active_idx'),
+            models.Index(fields=['is_default'], name='wh_default_idx'),
+            models.Index(fields=['warehouse_type'], name='wh_type_idx'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name} ({self.agence.nom})"
@@ -94,6 +100,10 @@ class Location(models.Model):
     class Meta:
         unique_together = ['warehouse', 'code']
         ordering = ['warehouse', 'code']
+        indexes = [
+            models.Index(fields=['warehouse', 'is_active'],
+                         name='loc_wh_active_idx'),
+        ]
 
     def __str__(self):
         return f"{self.warehouse.code} - {self.code}"
@@ -156,9 +166,14 @@ class StockMovement(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['product', 'movement_date']),
-            models.Index(fields=['from_warehouse', 'to_warehouse']),
+            models.Index(fields=['reference'], name='mov_reference_idx'),
+            models.Index(fields=['product', 'movement_date'],
+                         name='mov_prod_date_idx'),
+            models.Index(fields=['from_warehouse',
+                         'to_warehouse'], name='mov_wh_idx'),
+            models.Index(
+                fields=['movement_type', 'movement_date'], name='mov_type_date_idx'),
+            models.Index(fields=['-movement_date'], name='mov_date_desc_idx'),
         ]
         ordering = ['-movement_date']
 
@@ -215,8 +230,13 @@ class Transfer(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        indexes = [models.Index(fields=['reference']), models.Index(
-            fields=['status']), models.Index(fields=['from_agence', 'to_agence'])]
+        indexes = [
+            models.Index(fields=['reference'], name='trf_reference_idx'),
+            models.Index(fields=['status'], name='trf_status_idx'),
+            models.Index(fields=['from_agence', 'to_agence'],
+                         name='trf_agences_idx'),
+            models.Index(fields=['-created_at'], name='trf_created_idx'),
+        ]
         ordering = ['-created_at']
 
     def __str__(self):
@@ -248,6 +268,10 @@ class TransferItem(models.Model):
 
     class Meta:
         unique_together = ['transfer', 'product', 'variant']
+        indexes = [
+            models.Index(fields=['transfer', 'product'],
+                         name='trfi_trf_prod_idx'),
+        ]
 
     def __str__(self):
         return f"{self.product.name} - {self.quantity}"
@@ -258,10 +282,6 @@ class TransferItem(models.Model):
         received = self.quantity_received if self.quantity_received is not None else 0
         return qty - received
 
-
-# ============================================================
-# INVENTORY COUNT — ✅ CORRIGÉ
-# ============================================================
 
 class InventoryCount(models.Model):
     """Comptage d'inventaire"""
@@ -295,15 +315,17 @@ class InventoryCount(models.Model):
     class Meta:
         ordering = ['-count_date']
         indexes = [
-            models.Index(fields=['reference']),
-            models.Index(fields=['status']),
-            models.Index(fields=['warehouse', 'count_date']),
+            models.Index(fields=['reference'], name='inv_reference_idx'),
+            models.Index(fields=['status'], name='inv_status_idx'),
+            models.Index(fields=['warehouse', 'count_date'],
+                         name='inv_wh_date_idx'),
+            models.Index(fields=['warehouse', 'status'],
+                         name='inv_wh_status_idx'),
         ]
 
     def __str__(self):
         return f"Inventaire {self.reference} - {self.warehouse.name}"
 
-    # ✅ Génération automatique de la référence
     def save(self, *args, **kwargs):
         if not self.reference:
             last = InventoryCount.objects.order_by('-id').first()
@@ -338,6 +360,12 @@ class InventoryCountItem(models.Model):
 
     class Meta:
         unique_together = ['inventory', 'product', 'variant']
+        indexes = [
+            models.Index(fields=['inventory', 'product'],
+                         name='invi_inv_prod_idx'),
+            models.Index(fields=['inventory', 'is_counted'],
+                         name='invi_inv_counted_idx'),
+        ]
 
     def __str__(self):
         return f"{self.product.name} - Théorique: {self.theoretical_quantity} - Compté: {self.counted_quantity}"
@@ -384,6 +412,12 @@ class StockAlert(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'warehouse'],
+                         name='alert_status_wh_idx'),
+            models.Index(fields=['alert_type', 'status'],
+                         name='alert_type_status_idx'),
+        ]
 
     def __str__(self):
         return f"{self.get_alert_type_display()} - {self.product.name}"
@@ -412,6 +446,14 @@ class WarehouseStock(models.Model):
         unique_together = ['product', 'warehouse', 'variant']
         verbose_name = "Stock par entrepôt"
         verbose_name_plural = "Stocks par entrepôt"
+        indexes = [
+            models.Index(fields=['product', 'warehouse'],
+                         name='ws_prod_wh_idx'),
+            models.Index(fields=['warehouse', 'quantity'],
+                         name='ws_wh_qty_idx'),
+            models.Index(fields=['quantity', 'minimum_stock'],
+                         name='ws_low_stock_idx'),
+        ]
 
     def __str__(self):
         return f"{self.product.name} - {self.warehouse.name}: {self.quantity}"
@@ -453,8 +495,13 @@ class Lot(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        indexes = [models.Index(fields=['lot_number']), models.Index(
-            fields=['serial_number']), models.Index(fields=['expiry_date'])]
+        indexes = [
+            models.Index(fields=['lot_number'], name='lot_number_idx'),
+            models.Index(fields=['serial_number'], name='lot_serial_idx'),
+            models.Index(fields=['expiry_date'], name='lot_expiry_idx'),
+            models.Index(fields=['warehouse', 'expiry_date'],
+                         name='lot_wh_expiry_idx'),
+        ]
         ordering = ['-created_at']
 
     def __str__(self):
