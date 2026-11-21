@@ -1,15 +1,13 @@
 from django.db import models
-
+# USER SEYDIGROUP
 """
 Models pour l'application users
-Gestion des utilisateurs, agences et rôles
 """
-
 from django.contrib.auth.models import AbstractUser
 from django.contrib.auth.base_user import BaseUserManager
 from django.db import models
 from django.core.exceptions import ValidationError
-from django.conf import settings  # ✅ CORRECTION 1 : Import de settings
+from django.conf import settings
 from django_rest_passwordreset.signals import reset_password_token_created
 from django.dispatch import receiver
 from django.core.mail import EmailMultiAlternatives
@@ -21,7 +19,6 @@ class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError('L\'email est requis')
-
         email = self.normalize_email(email)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
@@ -41,21 +38,26 @@ class Agence(models.Model):
         ('principale', 'Agence Principale'),
         ('secondaire', 'Agence Secondaire'),
     )
-
     nom = models.CharField(max_length=200, verbose_name="Nom de l'agence")
-    code = models.CharField(max_length=20, unique=True, verbose_name="Code agence", blank=True)
-    type_agence = models.CharField(max_length=20, choices=TYPE_AGENCE_CHOICES, default='principale', verbose_name="Type d'agence")
+    code = models.CharField(max_length=20, unique=True,
+                            verbose_name="Code agence", blank=True)
+    type_agence = models.CharField(
+        max_length=20, choices=TYPE_AGENCE_CHOICES, default='principale', verbose_name="Type d'agence")
     adresse = models.TextField(verbose_name="Adresse")
     telephone = models.CharField(max_length=20, verbose_name="Téléphone")
     email = models.EmailField(verbose_name="Email")
     ville = models.CharField(max_length=100, verbose_name="Ville")
     code_postal = models.CharField(max_length=20, verbose_name="Code postal")
-    pays = models.CharField(max_length=100, default='France', verbose_name="Pays")
-
-    est_active = models.BooleanField(default=True, verbose_name="Agence active")
-    date_creation = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
-    date_modification = models.DateTimeField(auto_now=True, verbose_name="Date de modification")
-    created_by = models.ForeignKey('CustomUser', on_delete=models.SET_NULL, null=True, blank=True, related_name='agences_crees', verbose_name="Créée par")
+    pays = models.CharField(
+        max_length=100, default='France', verbose_name="Pays")
+    est_active = models.BooleanField(
+        default=True, verbose_name="Agence active")
+    date_creation = models.DateTimeField(
+        auto_now_add=True, verbose_name="Date de création")
+    date_modification = models.DateTimeField(
+        auto_now=True, verbose_name="Date de modification")
+    created_by = models.ForeignKey('CustomUser', on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name='agences_crees', verbose_name="Créée par")
 
     class Meta:
         verbose_name = "Agence"
@@ -85,7 +87,8 @@ class Agence(models.Model):
     def save(self, *args, **kwargs):
         if not self.code:
             prefix = 'P' if self.type_agence == 'principale' else 'S'
-            count = Agence.objects.filter(type_agence=self.type_agence).count() + 1
+            count = Agence.objects.filter(
+                type_agence=self.type_agence).count() + 1
             self.code = f"{prefix}{self.nom[:3].upper()}{str(count).zfill(3)}"
         super().save(*args, **kwargs)
 
@@ -97,11 +100,14 @@ class RoleAgence(models.Model):
         ('commercial', 'Commercial'),
         ('comptable', 'Comptable'),
     )
-
-    user = models.ForeignKey('CustomUser', on_delete=models.CASCADE, related_name='roles_agence', verbose_name="Utilisateur")
-    agence = models.ForeignKey(Agence, on_delete=models.CASCADE, related_name='roles', verbose_name="Agence")
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, verbose_name="Rôle")
-    date_attribution = models.DateTimeField(auto_now_add=True, verbose_name="Date d'attribution")
+    user = models.ForeignKey('CustomUser', on_delete=models.CASCADE,
+                             related_name='roles_agence', verbose_name="Utilisateur")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.CASCADE, related_name='roles', verbose_name="Agence")
+    role = models.CharField(
+        max_length=20, choices=ROLE_CHOICES, verbose_name="Rôle")
+    date_attribution = models.DateTimeField(
+        auto_now_add=True, verbose_name="Date d'attribution")
     est_actif = models.BooleanField(default=True, verbose_name="Rôle actif")
 
     class Meta:
@@ -114,9 +120,7 @@ class RoleAgence(models.Model):
         roles_disponibles = [r[0] for r in self.agence.get_roles_disponibles()]
         if self.role not in roles_disponibles:
             raise ValidationError(
-                f"Le rôle '{self.get_role_display()}' n'est pas disponible "
-                f"pour une agence {self.agence.get_type_agence_display()}. "
-                f"Rôles disponibles : {', '.join([dict(self.ROLE_CHOICES)[r] for r in roles_disponibles])}"
+                f"Le rôle '{self.get_role_display()}' n'est pas disponible pour cette agence."
             )
 
     def save(self, *args, **kwargs):
@@ -133,31 +137,48 @@ class CustomUser(AbstractUser):
         ('drh', 'DRH - Gestion RH toutes agences'),
         ('autre', 'Autre'),
     )
-
-    email = models.EmailField(max_length=200, unique=True, verbose_name="Email")
-    birthday = models.DateField(null=True, blank=True, verbose_name="Date de naissance")
-    username = models.CharField(max_length=200, null=True, blank=True, verbose_name="Nom d'utilisateur")
-    role_global = models.CharField(max_length=20, choices=ROLE_GLOBAL_CHOICES, default='autre', verbose_name="Rôle global")
-    department = models.CharField(max_length=20, null=True, blank=True, verbose_name="Département")
-    phone = models.CharField(max_length=20, null=True, blank=True, verbose_name="Téléphone")
+    email = models.EmailField(
+        max_length=200, unique=True, verbose_name="Email")
+    birthday = models.DateField(
+        null=True, blank=True, verbose_name="Date de naissance")
+    username = models.CharField(
+        max_length=200, null=True, blank=True, verbose_name="Nom d'utilisateur")
+    role_global = models.CharField(
+        max_length=20, choices=ROLE_GLOBAL_CHOICES, default='autre', verbose_name="Rôle global")
+    department = models.CharField(
+        max_length=20, null=True, blank=True, verbose_name="Département")
+    phone = models.CharField(max_length=20, null=True,
+                             blank=True, verbose_name="Téléphone")
     address = models.TextField(null=True, blank=True, verbose_name="Adresse")
-    city = models.CharField(max_length=100, null=True, blank=True, verbose_name="Ville")
-    country = models.CharField(max_length=100, null=True, blank=True, default='Sénégal', verbose_name="Pays")
-    postal_code = models.CharField(max_length=20, null=True, blank=True, verbose_name="Code postal")
-    employee_id = models.CharField(max_length=50, unique=True, null=True, blank=True, verbose_name="Matricule")
-    hire_date = models.DateField(null=True, blank=True, verbose_name="Date d'embauche")
-    contract_type = models.CharField(max_length=50, null=True, blank=True, verbose_name="Type de contrat")
-    salary = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Salaire")
-    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True, blank=True, related_name='utilisateurs_principaux', verbose_name="Agence principale")
+    city = models.CharField(max_length=100, null=True,
+                            blank=True, verbose_name="Ville")
+    country = models.CharField(
+        max_length=100, null=True, blank=True, default='Sénégal', verbose_name="Pays")
+    postal_code = models.CharField(
+        max_length=20, null=True, blank=True, verbose_name="Code postal")
+    employee_id = models.CharField(
+        max_length=50, unique=True, null=True, blank=True, verbose_name="Matricule")
+    hire_date = models.DateField(
+        null=True, blank=True, verbose_name="Date d'embauche")
+    contract_type = models.CharField(
+        max_length=50, null=True, blank=True, verbose_name="Type de contrat")
+    salary = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Salaire")
+    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True,
+                                          blank=True, related_name='utilisateurs_principaux', verbose_name="Agence principale")
     is_active = models.BooleanField(default=True, verbose_name="Actif")
-    last_login_ip = models.GenericIPAddressField(null=True, blank=True, verbose_name="Dernière IP")
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Date de création")
-    updated_at = models.DateTimeField(auto_now=True, verbose_name="Date de modification")
-    created_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='created_users', verbose_name="Créé par")
-    profile_picture = models.ImageField(upload_to='profile_pictures/', null=True, blank=True, verbose_name="Photo de profil")
+    last_login_ip = models.GenericIPAddressField(
+        null=True, blank=True, verbose_name="Dernière IP")
+    created_at = models.DateTimeField(
+        auto_now_add=True, verbose_name="Date de création")
+    updated_at = models.DateTimeField(
+        auto_now=True, verbose_name="Date de modification")
+    created_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name='created_users', verbose_name="Créé par")
+    profile_picture = models.ImageField(
+        upload_to='profile_pictures/', null=True, blank=True, verbose_name="Photo de profil")
 
     objects = CustomUserManager()
-
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = []
 
@@ -221,7 +242,8 @@ class CustomUser(AbstractUser):
 
     def get_role_dans_agence(self, agence_id):
         try:
-            role_agence = self.roles_agence.get(agence_id=agence_id, est_actif=True)
+            role_agence = self.roles_agence.get(
+                agence_id=agence_id, est_actif=True)
             return role_agence.role
         except RoleAgence.DoesNotExist:
             return None
@@ -235,7 +257,8 @@ class CustomUser(AbstractUser):
     def get_agences(self):
         if self.est_pdg() or self.est_drh():
             return Agence.objects.filter(est_active=True)
-        agences_ids = self.roles_agence.filter(est_actif=True).values_list('agence_id', flat=True)
+        agences_ids = self.roles_agence.filter(
+            est_actif=True).values_list('agence_id', flat=True)
         return Agence.objects.filter(id__in=agences_ids, est_active=True)
 
     def get_agences_par_type(self):
@@ -276,7 +299,8 @@ class CustomUser(AbstractUser):
             return False
 
     def get_all_roles(self):
-        roles = self.roles_agence.filter(est_actif=True).select_related('agence')
+        roles = self.roles_agence.filter(
+            est_actif=True).select_related('agence')
         return [
             {
                 'agence_id': role.agence.id,
@@ -299,18 +323,18 @@ def password_reset_token_created(reset_password_token, *args, **kwargs):
     """
     Signal pour envoyer un email de réinitialisation de mot de passe
     """
+    # On récupère l'URL depuis settings.py. On s'assure qu'elle finit par un slash.
     sitelink = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173/')
     if not sitelink.endswith('/'):
         sitelink += '/'
-        
+
     token = str(reset_password_token.key)
     full_link = f"{sitelink}password-reset/{token}"
 
     context = {
         'full_link': full_link,
         'email_address': reset_password_token.user.email,
-        # ✅ CORRECTION 2 : get_role_global_display au lieu de get_role_display
-        'role': reset_password_token.user.get_role_global_display() 
+        'role': reset_password_token.user.get_role_global_display()
     }
 
     html_message = render_to_string("backend/email.html", context=context)
@@ -320,7 +344,7 @@ def password_reset_token_created(reset_password_token, *args, **kwargs):
         msg = EmailMultiAlternatives(
             subject=f"Réinitialisation de mot de passe",
             body=plain_message,
-            from_email=settings.EMAIL_HOST_USER, # ✅ CORRECTION 3 : Lit ton email
+            from_email=settings.EMAIL_HOST_USER,
             to=[reset_password_token.user.email]
         )
         msg.attach_alternative(html_message, "text/html")

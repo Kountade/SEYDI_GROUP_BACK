@@ -1,3 +1,4 @@
+#SEYDIGROUP
 """
 Django settings for authentification project.
 """
