@@ -1,6 +1,5 @@
 from django.db import models
 
-# Create your models here.
 """
 Models pour l'application users
 Gestion des utilisateurs, agences et rôles
@@ -10,6 +9,7 @@ from django.contrib.auth.models import AbstractUser
 from django.contrib.auth.base_user import BaseUserManager
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.conf import settings  # ✅ AJOUTÉ : Nécessaire pour lire FRONTEND_URL
 from django_rest_passwordreset.signals import reset_password_token_created
 from django.dispatch import receiver
 from django.core.mail import EmailMultiAlternatives
@@ -18,29 +18,7 @@ from django.template.loader import render_to_string
 
 
 class CustomUserManager(BaseUserManager):
-    """
-    Gestionnaire personnalisé pour le modèle CustomUser
-
-    Méthodes:
-        create_user: Crée un utilisateur standard
-        create_superuser: Crée un superutilisateur (PDG)
-    """
-
     def create_user(self, email, password=None, **extra_fields):
-        """
-        Crée et sauvegarde un utilisateur standard
-
-        Args:
-            email (str): Email de l'utilisateur (obligatoire)
-            password (str, optional): Mot de passe
-            **extra_fields: Champs supplémentaires
-
-        Returns:
-            CustomUser: Instance de l'utilisateur créé
-
-        Raises:
-            ValueError: Si l'email n'est pas fourni
-        """
         if not email:
             raise ValueError('L\'email est requis')
 
@@ -51,17 +29,6 @@ class CustomUserManager(BaseUserManager):
         return user
 
     def create_superuser(self, email, password=None, **extra_fields):
-        """
-        Crée et sauvegarde un superutilisateur (PDG)
-
-        Args:
-            email (str): Email du superutilisateur
-            password (str, optional): Mot de passe
-            **extra_fields: Champs supplémentaires
-
-        Returns:
-            CustomUser: Instance du superutilisateur créé
-        """
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('role_global', 'pdg')
@@ -70,26 +37,6 @@ class CustomUserManager(BaseUserManager):
 
 
 class Agence(models.Model):
-    """
-    Modèle représentant une agence
-
-    Attributs:
-        TYPE_AGENCE_CHOICES: Types d'agence disponibles
-        nom: Nom de l'agence
-        code: Code unique de l'agence (auto-généré)
-        type_agence: Type d'agence (principale/secondaire)
-        adresse: Adresse complète
-        telephone: Numéro de téléphone
-        email: Email de contact
-        ville: Ville
-        code_postal: Code postal
-        pays: Pays (défaut: France)
-        est_active: Statut actif/inactif
-        date_creation: Date de création
-        date_modification: Date de dernière modification
-        created_by: Utilisateur ayant créé l'agence
-    """
-
     TYPE_AGENCE_CHOICES = (
         ('principale', 'Agence Principale'),
         ('secondaire', 'Agence Secondaire'),
@@ -98,8 +45,8 @@ class Agence(models.Model):
     nom = models.CharField(max_length=200, verbose_name="Nom de l'agence")
     code = models.CharField(max_length=20, unique=True,
                             verbose_name="Code agence", blank=True)
-    type_agence = models.CharField(max_length=20, choices=TYPE_AGENCE_CHOICES,
-                                   default='principale', verbose_name="Type d'agence")
+    type_agence = models.CharField(
+        max_length=20, choices=TYPE_AGENCE_CHOICES, default='principale', verbose_name="Type d'agence")
     adresse = models.TextField(verbose_name="Adresse")
     telephone = models.CharField(max_length=20, verbose_name="Téléphone")
     email = models.EmailField(verbose_name="Email")
@@ -108,7 +55,6 @@ class Agence(models.Model):
     pays = models.CharField(
         max_length=100, default='France', verbose_name="Pays")
 
-    # Métadonnées
     est_active = models.BooleanField(
         default=True, verbose_name="Agence active")
     date_creation = models.DateTimeField(
@@ -133,43 +79,17 @@ class Agence(models.Model):
         return f"{self.nom} ({self.get_type_agence_display()})"
 
     def get_roles_disponibles(self):
-        """
-        Retourne la liste des rôles disponibles selon le type d'agence
-
-        Returns:
-            list: Liste de tuples (code_role, libellé_role)
-
-        Note:
-            - Agence Principale: chef_agence, gestionnaire_stock, commercial, comptable
-            - Agence Secondaire: chef_agence, gestionnaire_stock, commercial, comptable
-        """
-        # ✅ MODIFICATION : Même liste pour les deux types d'agences
         return [
             ('chef_agence', 'Chef d\'agence'),
             ('gestionnaire_stock', 'Gestionnaire de stock'),
             ('commercial', 'Commercial'),
-            ('comptable', 'Comptable'),  # ✅ NOUVEAU RÔLE AJOUTÉ
+            ('comptable', 'Comptable'),
         ]
 
     def get_nombre_roles(self):
-        """
-        Retourne le nombre de rôles disponibles
-
-        Returns:
-            int: Nombre de rôles
-        """
         return len(self.get_roles_disponibles())
 
     def save(self, *args, **kwargs):
-        """
-        Surcharge de la méthode save pour générer automatiquement le code agence
-
-        Format du code:
-            - P (Principale) ou S (Secondaire)
-            - 3 premières lettres du nom en majuscules
-            - Numéro séquentiel sur 3 chiffres
-            Exemple: PPAR001 (Paris Principale n°1)
-        """
         if not self.code:
             prefix = 'P' if self.type_agence == 'principale' else 'S'
             count = Agence.objects.filter(
@@ -179,29 +99,17 @@ class Agence(models.Model):
 
 
 class RoleAgence(models.Model):
-    """
-    Modèle des rôles spécifiques à une agence
-
-    Attributs:
-        ROLE_CHOICES: Liste des rôles possibles
-        user: Utilisateur associé
-        agence: Agence concernée
-        role: Rôle attribué
-        date_attribution: Date d'attribution du rôle
-        est_actif: Statut actif/inactif du rôle
-    """
-
     ROLE_CHOICES = (
         ('chef_agence', 'Chef d\'agence'),
         ('gestionnaire_stock', 'Gestionnaire de stock'),
         ('commercial', 'Commercial'),
-        ('comptable', 'Comptable'),  # ✅ NOUVEAU RÔLE AJOUTÉ
+        ('comptable', 'Comptable'),
     )
 
     user = models.ForeignKey('CustomUser', on_delete=models.CASCADE,
                              related_name='roles_agence', verbose_name="Utilisateur")
-    agence = models.ForeignKey(Agence, on_delete=models.CASCADE,
-                               related_name='roles', verbose_name="Agence")
+    agence = models.ForeignKey(
+        Agence, on_delete=models.CASCADE, related_name='roles', verbose_name="Agence")
     role = models.CharField(
         max_length=20, choices=ROLE_CHOICES, verbose_name="Rôle")
     date_attribution = models.DateTimeField(
@@ -215,22 +123,13 @@ class RoleAgence(models.Model):
         ordering = ['agence', 'user']
 
     def clean(self):
-        """
-        Validation personnalisée : vérifie que le rôle est compatible avec le type d'agence
-
-        Raises:
-            ValidationError: Si le rôle n'est pas disponible pour ce type d'agence
-        """
         roles_disponibles = [r[0] for r in self.agence.get_roles_disponibles()]
         if self.role not in roles_disponibles:
             raise ValidationError(
-                f"Le rôle '{self.get_role_display()}' n'est pas disponible "
-                f"pour une agence {self.agence.get_type_agence_display()}. "
-                f"Rôles disponibles : {', '.join([dict(self.ROLE_CHOICES)[r] for r in roles_disponibles])}"
+                f"Le rôle '{self.get_role_display()}' n'est pas disponible pour cette agence."
             )
 
     def save(self, *args, **kwargs):
-        """Surcharge de save avec validation automatique"""
         self.full_clean()
         super().save(*args, **kwargs)
 
@@ -239,17 +138,6 @@ class RoleAgence(models.Model):
 
 
 class CustomUser(AbstractUser):
-    """
-    Modèle utilisateur personnalisé avec gestion multi-agences et rôles
-
-    Ce modèle étend AbstractUser pour supporter:
-    - Authentification par email (username non requis)
-    - Rôles globaux (PDG, DRH)
-    - Rôles par agence (Chef, Commercial, Gestionnaire, Comptable)
-    - Informations professionnelles complètes
-    """
-
-    # Rôles globaux (niveau entreprise)
     ROLE_GLOBAL_CHOICES = (
         ('pdg', 'PDG - Accès total'),
         ('drh', 'DRH - Gestion RH toutes agences'),
@@ -262,16 +150,10 @@ class CustomUser(AbstractUser):
         null=True, blank=True, verbose_name="Date de naissance")
     username = models.CharField(
         max_length=200, null=True, blank=True, verbose_name="Nom d'utilisateur")
-
-    # Rôle global
     role_global = models.CharField(
         max_length=20, choices=ROLE_GLOBAL_CHOICES, default='autre', verbose_name="Rôle global")
-
-    # Département (conservé pour compatibilité)
     department = models.CharField(
         max_length=20, null=True, blank=True, verbose_name="Département")
-
-    # Informations personnelles
     phone = models.CharField(max_length=20, null=True,
                              blank=True, verbose_name="Téléphone")
     address = models.TextField(null=True, blank=True, verbose_name="Adresse")
@@ -281,8 +163,6 @@ class CustomUser(AbstractUser):
         max_length=100, null=True, blank=True, default='Sénégal', verbose_name="Pays")
     postal_code = models.CharField(
         max_length=20, null=True, blank=True, verbose_name="Code postal")
-
-    # Informations professionnelles
     employee_id = models.CharField(
         max_length=50, unique=True, null=True, blank=True, verbose_name="Matricule")
     hire_date = models.DateField(
@@ -291,12 +171,8 @@ class CustomUser(AbstractUser):
         max_length=50, null=True, blank=True, verbose_name="Type de contrat")
     salary = models.DecimalField(
         max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Salaire")
-
-    # Agence principale (optionnel)
-    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True, blank=True,
-                                          related_name='utilisateurs_principaux', verbose_name="Agence principale")
-
-    # Métadonnées
+    agence_principale = models.ForeignKey(Agence, on_delete=models.SET_NULL, null=True,
+                                          blank=True, related_name='utilisateurs_principaux', verbose_name="Agence principale")
     is_active = models.BooleanField(default=True, verbose_name="Actif")
     last_login_ip = models.GenericIPAddressField(
         null=True, blank=True, verbose_name="Dernière IP")
@@ -304,10 +180,8 @@ class CustomUser(AbstractUser):
         auto_now_add=True, verbose_name="Date de création")
     updated_at = models.DateTimeField(
         auto_now=True, verbose_name="Date de modification")
-    created_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True,
-                                   related_name='created_users', verbose_name="Créé par")
-
-    # Photo de profil
+    created_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name='created_users', verbose_name="Créé par")
     profile_picture = models.ImageField(
         upload_to='profile_pictures/', null=True, blank=True, verbose_name="Photo de profil")
 
@@ -326,92 +200,55 @@ class CustomUser(AbstractUser):
             ("can_manage_inventory", "Peut gérer l'inventaire"),
             ("can_manage_rh", "Peut gérer les ressources humaines"),
             ("can_view_all_agences", "Peut voir toutes les agences"),
-            ("can_manage_accounting", "Peut gérer la comptabilité"),  # ✅ NOUVELLE PERMISSION
+            ("can_manage_accounting", "Peut gérer la comptabilité"),
         ]
 
     def __str__(self):
         return f"{self.email} ({self.get_role_global_display()})"
 
-    # ==================== MÉTHODES DE BASE ====================
-
     def get_full_name(self):
-        """Retourne le nom complet de l'utilisateur"""
         if self.first_name and self.last_name:
             return f"{self.first_name} {self.last_name}"
         return self.email
 
     def get_full_name_display(self):
-        """Alias de get_full_name pour compatibilité"""
         return self.get_full_name()
 
-    # ==================== MÉTHODES DE RÔLES GLOBAUX ====================
-
     def est_pdg(self):
-        """Vérifie si l'utilisateur est PDG"""
         return self.role_global == 'pdg'
 
     def est_drh(self):
-        """Vérifie si l'utilisateur est DRH"""
         return self.role_global == 'drh'
 
-    # ==================== MÉTHODES DE RÔLES PAR AGENCE ====================
-
     def est_chef_agence(self, agence_id=None):
-        """
-        Vérifie si l'utilisateur est chef d'agence
-        - Si agence_id est fourni: vérifie pour cette agence
-        - Sinon: vérifie s'il est chef dans au moins une agence
-        """
         if agence_id:
             return self.a_role_dans_agence(agence_id, 'chef_agence')
         return self.roles_agence.filter(role='chef_agence', est_actif=True).exists()
 
     def est_commercial(self, agence_id=None):
-        """
-        Vérifie si l'utilisateur est commercial
-        - Si agence_id est fourni: vérifie pour cette agence
-        - Sinon: vérifie s'il est commercial dans au moins une agence
-        """
         if agence_id:
             return self.a_role_dans_agence(agence_id, 'commercial')
         return self.roles_agence.filter(role='commercial', est_actif=True).exists()
 
     def est_gestionnaire_stock(self, agence_id=None):
-        """
-        Vérifie si l'utilisateur est gestionnaire de stock
-        - Si agence_id est fourni: vérifie pour cette agence
-        - Sinon: vérifie s'il est gestionnaire dans au moins une agence
-        """
         if agence_id:
             return self.a_role_dans_agence(agence_id, 'gestionnaire_stock')
         return self.roles_agence.filter(role='gestionnaire_stock', est_actif=True).exists()
 
     def est_comptable(self, agence_id=None):
-        """
-        Vérifie si l'utilisateur est comptable
-        - Si agence_id est fourni: vérifie pour cette agence
-        - Sinon: vérifie s'il est comptable dans au moins une agence
-        """
         if agence_id:
             return self.a_role_dans_agence(agence_id, 'comptable')
         return self.roles_agence.filter(role='comptable', est_actif=True).exists()
 
     def est_vendeur(self, agence_id=None):
-        """Alias de est_commercial pour compatibilité"""
         return self.est_commercial(agence_id)
 
     def a_role_dans_agence(self, agence_id, role):
-        """
-        Vérifie si l'utilisateur a un rôle spécifique dans une agence
-        """
         if not agence_id:
             return self.roles_agence.filter(role=role, est_actif=True).exists()
         return self.roles_agence.filter(agence_id=agence_id, role=role, est_actif=True).exists()
 
     def get_role_dans_agence(self, agence_id):
-        """
-        Retourne le rôle de l'utilisateur dans une agence spécifique
-        """
         try:
             role_agence = self.roles_agence.get(
                 agence_id=agence_id, est_actif=True)
@@ -420,33 +257,19 @@ class CustomUser(AbstractUser):
             return None
 
     def get_role_display_dans_agence(self, agence_id):
-        """
-        Retourne l'affichage du rôle dans une agence spécifique
-        """
         role = self.get_role_dans_agence(agence_id)
         if role:
             return dict(RoleAgence.ROLE_CHOICES).get(role, role)
         return "Aucun rôle"
 
-    # ==================== MÉTHODES D'ACCÈS AUX AGENCES ====================
-
     def get_agences(self):
-        """
-        Retourne toutes les agences auxquelles l'utilisateur a accès
-        - PDG/DRH: toutes les agences actives
-        - Autres: agences via leurs rôles
-        """
         if self.est_pdg() or self.est_drh():
             return Agence.objects.filter(est_active=True)
-
         agences_ids = self.roles_agence.filter(
             est_actif=True).values_list('agence_id', flat=True)
         return Agence.objects.filter(id__in=agences_ids, est_active=True)
 
     def get_agences_par_type(self):
-        """
-        Retourne les agences groupées par type
-        """
         agences = self.get_agences()
         return {
             'principales': agences.filter(type_agence='principale'),
@@ -454,35 +277,21 @@ class CustomUser(AbstractUser):
         }
 
     def get_agence_principale(self):
-        """
-        Retourne l'agence principale de l'utilisateur
-        """
         if self.agence_principale:
             return self.agence_principale
-
         premiere_agence = self.roles_agence.filter(est_actif=True).first()
         if premiere_agence:
             return premiere_agence.agence
         return None
 
     def peut_acceder_agence(self, agence_id):
-        """
-        Vérifie si l'utilisateur peut accéder à une agence spécifique
-        - PDG/DRH: accès à toutes les agences
-        - Autres: vérifie s'il a un rôle dans cette agence
-        """
         if self.est_pdg() or self.est_drh():
             return True
         if not agence_id:
             return False
         return self.roles_agence.filter(agence_id=agence_id, est_actif=True).exists()
 
-    # ==================== MÉTHODES DE GESTION DES RÔLES ====================
-
     def get_roles_disponibles_agence(self, agence_id):
-        """
-        Retourne les rôles disponibles pour une agence spécifique
-        """
         try:
             agence = Agence.objects.get(id=agence_id)
             return agence.get_roles_disponibles()
@@ -490,9 +299,6 @@ class CustomUser(AbstractUser):
             return []
 
     def peut_assigner_role(self, agence_id, role):
-        """
-        Vérifie si un rôle peut être assigné dans une agence
-        """
         try:
             agence = Agence.objects.get(id=agence_id)
             roles_disponibles = [r[0] for r in agence.get_roles_disponibles()]
@@ -501,9 +307,6 @@ class CustomUser(AbstractUser):
             return False
 
     def get_all_roles(self):
-        """
-        Retourne tous les rôles de l'utilisateur avec leurs agences
-        """
         roles = self.roles_agence.filter(
             est_actif=True).select_related('agence')
         return [
@@ -517,10 +320,7 @@ class CustomUser(AbstractUser):
             for role in roles
         ]
 
-    # ==================== MÉTHODES POUR LES PERMISSIONS ====================
-
     def has_perm(self, perm, obj=None):
-        """Vérifie si l'utilisateur a une permission spécifique"""
         if self.est_pdg():
             return True
         return super().has_perm(perm, obj)
@@ -529,11 +329,14 @@ class CustomUser(AbstractUser):
 @receiver(reset_password_token_created)
 def password_reset_token_created(reset_password_token, *args, **kwargs):
     """
-    Signal pour envoyer un email de réinitialisation de mot de passe
+    ✅ CORRIGÉ : Utilise le bon lien (Render) et le bon expéditeur Gmail
     """
-    sitelink = "http://localhost:5173/"
-    token = "{}".format(reset_password_token.key)
-    full_link = str(sitelink) + str("password-reset/") + str(token)
+    sitelink = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173/')
+    if not sitelink.endswith('/'):
+        sitelink += '/'
+
+    token = str(reset_password_token.key)
+    full_link = f"{sitelink}password-reset/{token}"
 
     context = {
         'full_link': full_link,
@@ -543,12 +346,14 @@ def password_reset_token_created(reset_password_token, *args, **kwargs):
     html_message = render_to_string("backend/email.html", context=context)
     plain_message = strip_tags(html_message)
 
-    msg = EmailMultiAlternatives(
-        subject=f"Réinitialisation de mot de passe pour {reset_password_token.user.email}",
-        body=plain_message,
-        from_email="codelivecamp@gmail.com",
-        to=[reset_password_token.user.email]
-    )
-
-    msg.attach_alternative(html_message, "text/html")
-    msg.send()
+    try:
+        msg = EmailMultiAlternatives(
+            subject=f"Réinitialisation de mot de passe pour {reset_password_token.user.email}",
+            body=plain_message,
+            from_email=settings.EMAIL_HOST_USER,  # ✅ Utilise ton email Gmail
+            to=[reset_password_token.user.email]
+        )
+        msg.attach_alternative(html_message, "text/html")
+        msg.send(fail_silently=False)
+    except Exception as e:
+        print(f"❌ Erreur envoi email : {e}")
