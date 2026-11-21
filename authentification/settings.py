@@ -4,40 +4,44 @@ Django settings for authentification project.
 
 from pathlib import Path
 import os
-import dj_database_url
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 # ============================================================
-# SÉCURITÉ (Lit tes variables Render)
+# SÉCURITÉ
 # ============================================================
 SECRET_KEY = os.environ.get(
     'SECRET_KEY',
     "django-insecure-)bd69cs_1i-c_cs4h$0ks^$o_kx&@fw&sjrxs2-tlnpgn+_@ii"
 )
 
-# ✅ Lit le DEBUG (False sur Render, True en local)
+# ✅ Lit le DEBUG de Render (False en prod, True en local)
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = os.environ.get(
-    'ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+    'ALLOWED_HOSTS', 'localhost,127.0.0.1,seydi-group-back-zwn9.onrender.com'
+).split(',')
 
-CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',')
+CORS_ALLOWED_ORIGINS = os.environ.get(
+    'CORS_ALLOWED_ORIGINS', 'http://localhost:5173,https://seydigroupeg.onrender.com'
+).split(',')
 
-CSRF_TRUSTED_ORIGINS = os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',')
+CSRF_TRUSTED_ORIGINS = os.environ.get(
+    'CSRF_TRUSTED_ORIGINS', 'http://localhost:5173,https://seydigroupeg.onrender.com,https://seydi-group-back-zwn9.onrender.com'
+).split(',')
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-# ✅ LIGNE CRUCIALE : Lit l'URL de ton frontend sur Render
+# ✅ LIGNE CRUCIALE : Lit l'URL de Render
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173/')
 if not FRONTEND_URL.endswith('/'):
     FRONTEND_URL += '/'
 
 
 # ============================================================
-# APPLICATIONS
+# APPLICATIONS (TON CODE EXACT)
 # ============================================================
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -69,7 +73,7 @@ INSTALLED_APPS = [
 # ============================================================
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -79,13 +83,12 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
 
 # ============================================================
 # AUTHENTIFICATION & REST
 # ============================================================
+CORS_ALLOW_ALL_ORIGINS = True
 AUTH_USER_MODEL = 'users.CustomUser'
-
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
 ]
@@ -96,6 +99,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ],
 }
+
 
 ROOT_URLCONF = "authentification.urls"
 
@@ -118,17 +122,20 @@ WSGI_APPLICATION = "authentification.wsgi.application"
 
 
 # ============================================================
-# DATABASE
+# DATABASE (Sécurisé pour local ET Render)
 # ============================================================
 if os.environ.get('RENDER'):
+    # Sur Render, on utilise PostgreSQL
+    import dj_database_url
     DATABASES = {
         'default': dj_database_url.config(default=os.environ.get('DATABASE_URL'))
     }
 else:
+    # En local, on utilise SQLite (pas besoin de dj_database_url)
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
         }
     }
 
@@ -169,7 +176,10 @@ USE_TZ = True
 # STATIC & MEDIA
 # ============================================================
 STATIC_URL = '/static/'
-STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
+# On ne charge le dossier static QUE s'il existe
+if os.path.exists(os.path.join(BASE_DIR, 'static')):
+    STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
+
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
